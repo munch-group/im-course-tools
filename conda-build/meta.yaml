@@ -1,18 +1,18 @@
 {% set pyproject = load_file_data("../pyproject.toml", from_recipe_dir=True) %}
 
 package:
-  name: munch-group-library
+  name: im-tools
   version: {{ pyproject.get("project").get("version") }}
 
 source:
-  git_url: https://github.com/munch-group/munch-group-library.git
+  git_url: https://github.com/munch-group/im-tools.git
 
 build:
   number: 0
   script: {{ PYTHON }} -m pip install . -vv
   python_version_independent: true
   # entry_points:
-  #  - munch-group-library = munch_group_library:munch_group_library
+  #  - im-tools = im_tools:im_tools
 
 requirements:
   host:
@@ -36,10 +36,10 @@ dependencies:   # keep this block with only these packages
 
 test:
   imports:
-    - munch_group_library
+    - im_tools
 
 about:
-  home: https://github.com/munch-group/munch-group-library.git
+  home: https://github.com/munch-group/im-tools.git
   license: MIT
-  dev_url: https://github.com/munch-group/munch-group-library.git
-  doc_url: https://munch-group.org/munch-group-library
+  dev_url: https://github.com/munch-group/im-tools.git
+  doc_url: https://munch-group.org/im-tools
