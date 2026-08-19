@@ -2,7 +2,7 @@
 
 Both of these used to be a loose script in the student's own folder, which
 meant a fix could only reach them by asking a hundred people to download a file
-again. Here they travel with the package instead: releasing im-tools updates
+again. Here they travel with the package instead: releasing im-course-tools updates
 them.
 """
 
@@ -17,7 +17,7 @@ from .course import fetch
 
 # What `im check` insists on. The pair is (import name, what to call it), so a
 # missing package can be reported by the name a student would recognise. Adding
-# a widget to the course means adding it here and releasing im-tools.
+# a widget to the course means adding it here and releasing im-course-tools.
 REQUIRED = [
     ("steps_widget", "steps-widget"),
     ("puzzle_widget", "puzzle-widget"),

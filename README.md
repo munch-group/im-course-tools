@@ -1,4 +1,4 @@
-# im-tools
+# im-course-tools
 
 The `im` command for the [Instructing Machines](https://munch-group.org/instructing-machines)
 course: a small, pure-Python CLI that students run from their course folder.

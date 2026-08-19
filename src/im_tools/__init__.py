@@ -1,4 +1,4 @@
-"""im-tools: the `im` command for the Instructing Machines course.
+"""im-course-tools: the `im` command for the Instructing Machines course.
 
 The course folder students download holds their own work and nothing else. The
 commands that fetch chapters and projects, check the environment and refresh it

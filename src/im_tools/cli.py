@@ -23,7 +23,7 @@ from .course import CourseFolderNotFound, course_folder
 
 try:                                            # installed metadata, not a constant
     from importlib.metadata import version as _version
-    __version__ = _version("im-tools")
+    __version__ = _version("im-course-tools")
 except Exception:                               # pragma: no cover - source checkout
     __version__ = "0.0.0"
 

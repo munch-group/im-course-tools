@@ -1,7 +1,7 @@
 {% set pyproject = load_file_data("../pyproject.toml", from_recipe_dir=True) %}
 
 package:
-  name: im-tools
+  name: im-course-tools
   version: {{ pyproject.get("project").get("version") }}
 
 source:
@@ -10,23 +10,23 @@ source:
 build:
   number: 0
   script: {{ PYTHON }} -m pip install . -vv
-  python_version_independent: true
+  noarch: python
   entry_points:
     - im = im_tools.cli:main
 
 requirements:
   host:
-    - python
+    # Take the interpreter bound from pyproject rather than leaving it open:
+    # unconstrained, conda-build picks the newest python there is, and pip then
+    # refuses to install into it if requires-python does not reach that far.
+    - python {{ pyproject.get("project").get("requires-python") }}
     - pip
-    - setuptools>=65.0    
+    - setuptools>=65.0
   run:  # your library dependencies
-    # A python_version_independent package still has to say it needs python,
-    # and with which floor: the loop below only carries what pyproject lists,
-    # which is click and nothing else.
-    - python >=3.9
+    - python {{ pyproject.get("project").get("requires-python") }}
     {% for dep in pyproject.get("project").get("dependencies") %}
     - {{ dep.lower() }}
-    {% endfor %}  
+    {% endfor %}
 
 channels:  # channels for your library dependencies
   - conda-forge
