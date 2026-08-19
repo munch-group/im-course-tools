@@ -11,8 +11,8 @@ build:
   number: 0
   script: {{ PYTHON }} -m pip install . -vv
   python_version_independent: true
-  # entry_points:
-  #  - im-tools = im_tools:im_tools
+  entry_points:
+    - im = im_tools.cli:main
 
 requirements:
   host:

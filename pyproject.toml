@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "im-tools"
-version = "0.1.16"
-description = "Project description"
+version = "0.1.1"
+description = "The `im` command for the Instructing Machines course"
 authors = [
-    {name = "Your Name", email = "your@email.com"}
+    {name = "Kasper Munch", email = "kaspermunch@birc.au.dk"}
 ]
 readme = "README.md"
 license = {text = "MIT"}
@@ -17,7 +17,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
 ]
 dependencies = [
-
+    "click>=8",
 ]
 
 [project.urls]
@@ -26,7 +26,7 @@ Repository = "https://github.com/munch-group/im-tools"
 Documentation = "https://munch-group.org/im-tools"
 
 [project.scripts]
-im-tools = "im_tools:im_tools"
+im = "im_tools.cli:main"
 
 [tool.setuptools]
 include-package-data = true
@@ -38,12 +38,16 @@ exclude = ["test*"]
 [tool.setuptools.package-data]
 im_tools = ["data/*.txt", "data/*.csv", "data/*.pickle", "data/*.h5"]
 
+[tool.pytest.ini_options]
+testpaths = ["test"]
+
 [tool.pixi.workspace]
 channels = ["conda-forge", "munch-group"]
 platforms = ["osx-arm64",  "linux-64"]
 
 [tool.pixi.dependencies]
 python = ">=3.9,<3.14"
+click = ">=8"
 pytest = "*"
 jupyter = "*"
 quarto = "*"
@@ -91,7 +95,7 @@ cmd = "git clean -id"
 description = "Removes untracked files and directories but respects your .gitignores"
 
 [tool.pixi.tasks.test]
-cmd = "mkdir -p tests/pytest/tmp && jupyter nbconvert docs/pages/tutorial/*.ipynb --to script --TagRemovePreprocessor.enabled=True --TagRemovePreprocessor.remove_cell_tags='{\"skip-execution\"}' --output-dir tests/pytest/tmp && pytest tests/pytest/"
+cmd = "pytest"
 description = "Run tests"
 
 [tool.pixi.tasks.commit]
