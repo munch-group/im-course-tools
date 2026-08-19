@@ -20,6 +20,10 @@ requirements:
     - pip
     - setuptools>=65.0    
   run:  # your library dependencies
+    # A python_version_independent package still has to say it needs python,
+    # and with which floor: the loop below only carries what pyproject lists,
+    # which is click and nothing else.
+    - python >=3.9
     {% for dep in pyproject.get("project").get("dependencies") %}
     - {{ dep.lower() }}
     {% endfor %}  

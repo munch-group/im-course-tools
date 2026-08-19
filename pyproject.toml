@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "im-tools"
-version = "0.1.1"
+version = "0.1.2"
 description = "The `im` command for the Instructing Machines course"
 authors = [
     {name = "Kasper Munch", email = "kaspermunch@birc.au.dk"}
 ]
 readme = "README.md"
 license = {text = "MIT"}
-requires-python = ">=3.9,<3.14"
+requires-python = ">=3.9"
 classifiers = [
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
