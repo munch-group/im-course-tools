@@ -21,12 +21,12 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/munch-group/im-tools"
-Repository = "https://github.com/munch-group/im-tools"
-Documentation = "https://munch-group.org/im-tools"
+Homepage = "https://github.com/munch-group/im-course-tools"
+Repository = "https://github.com/munch-group/im-course-tools"
+Documentation = "https://munch-group.org/im-course-tools"
 
 [project.scripts]
-im = "im_tools.cli:main"
+im = "im_course_tools.cli:main"
 
 [tool.setuptools]
 include-package-data = true
@@ -36,7 +36,7 @@ where = ["src"]
 exclude = ["test*"]
 
 [tool.setuptools.package-data]
-im_tools = ["data/*.txt", "data/*.csv", "data/*.pickle", "data/*.h5"]
+im_course_tools = ["data/*.txt", "data/*.csv", "data/*.pickle", "data/*.h5"]
 
 [tool.pytest.ini_options]
 testpaths = ["test"]

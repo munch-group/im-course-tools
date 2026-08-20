@@ -37,7 +37,7 @@ interlinks:
     #   inv: objects-test.txt
 
 website:
-  title: "im-tools"
+  title: "im-course-tools"
   page-navigation: true
   navbar:
     left:
@@ -47,7 +47,7 @@ website:
       #   text: Gallery
     right:
       - icon: github
-        href: https://github.com/munch-group/im-tools/
+        href: https://github.com/munch-group/im-course-tools/
   sidebar:
     - id: pages
       title: Get Started
@@ -76,7 +76,7 @@ format:
       theme: neutral 
 
 quartodoc:
-  package: im-tools
+  package: im-course-tools
   style: pkgdown
   dir: api
   render_interlinks: true
@@ -90,13 +90,13 @@ quartodoc:
 
   sections:
     - title: Some section
-      package: im_tools.modulename
+      package: im_course_tools.modulename
       desc: |
         Some description...
       contents:
         - functionname
     - title: Some other section
-      package: im_tools.modulename
+      package: im_course_tools.modulename
       desc: |
         Some description...
       contents:

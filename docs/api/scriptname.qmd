@@ -1,6 +1,6 @@
-# scriptname { #im_tools.modulename.scriptname }
+# scriptname { #im_course_tools.modulename.scriptname }
 
 ```python
-im_tools.modulename.scriptname()
+im_course_tools.modulename.scriptname()
 ```
 

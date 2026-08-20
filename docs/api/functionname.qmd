@@ -1,7 +1,7 @@
-# functionname { #im_tools.modulename.functionname }
+# functionname { #im_course_tools.modulename.functionname }
 
 ```python
-im_tools.modulename.functionname(x=1, y=1)
+im_course_tools.modulename.functionname(x=1, y=1)
 ```
 
 The sum of two numbers.

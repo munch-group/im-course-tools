@@ -13,9 +13,9 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from im_tools import release
-from im_tools.cli import main
-from im_tools.release import (CONDA, CONDA_GLOBAL, CONDA_PROJECT, PACKAGE, PIP,
+from im_course_tools import release
+from im_course_tools.cli import main
+from im_course_tools.release import (CONDA, CONDA_GLOBAL, CONDA_PROJECT, PACKAGE, PIP,
                               PIPX, SOURCE, Install)
 
 
@@ -39,13 +39,13 @@ def conda_prefix(where: Path, channel: str = "https://conda.anaconda.org/munch-g
     meta.mkdir(parents=True)
     (meta / f"{PACKAGE}-{version}-pyhd8ed1ab_0.json").write_text(json.dumps(
         {"name": PACKAGE, "version": version, "channel": channel}))
-    (where / "im_tools").mkdir(parents=True, exist_ok=True)
+    (where / "im_course_tools").mkdir(parents=True, exist_ok=True)
     return where
 
 
 def code_in(prefix: Path) -> Path:
     """A path standing in for the module file, so the install counts as installed."""
-    return prefix / "im_tools" / "release.py"
+    return prefix / "im_course_tools" / "release.py"
 
 
 # --- is that one newer than this one ---------------------------------------- #
@@ -114,13 +114,13 @@ def test_a_conda_environment_somewhere_else_is_recognised(tmp_path):
 
 def test_a_pip_install_is_recognised(tmp_path):
     prefix = tmp_path / "venv"
-    (prefix / "im_tools").mkdir(parents=True)
+    (prefix / "im_course_tools").mkdir(parents=True)
     assert release.describe(prefix, home=tmp_path, code=code_in(prefix)).kind == PIP
 
 
 def test_a_pipx_install_is_recognised(tmp_path):
     prefix = tmp_path / ".local" / "pipx" / "venvs" / PACKAGE
-    (prefix / "im_tools").mkdir(parents=True)
+    (prefix / "im_course_tools").mkdir(parents=True)
     assert release.describe(prefix, home=tmp_path, code=code_in(prefix)).kind == PIPX
 
 
@@ -381,7 +381,7 @@ def test_update_upgrades_im_before_touching_the_environment(course, monkeypatch)
     """The refresh that follows should be done by the new code, not the old."""
     monkeypatch.setenv("IM_COURSE_FOLDER", str(course))
     monkeypatch.setattr(release, "upgrade_if_newer", lambda *a, **k: 0)
-    monkeypatch.setattr("im_tools.environment.update",
+    monkeypatch.setattr("im_course_tools.environment.update",
                         lambda *a, **k: pytest.fail("carried on with the old code"))
     result = CliRunner().invoke(main, ["update"])
     assert result.exit_code == 0
@@ -391,15 +391,15 @@ def test_update_can_be_told_to_leave_im_alone(course, monkeypatch):
     monkeypatch.setenv("IM_COURSE_FOLDER", str(course))
     monkeypatch.setattr(release, "upgrade_if_newer",
                         lambda *a, **k: pytest.fail("upgraded anyway"))
-    monkeypatch.setattr("im_tools.environment.update", lambda *a, **k: 0)
+    monkeypatch.setattr("im_course_tools.environment.update", lambda *a, **k: 0)
     assert CliRunner().invoke(main, ["update", "--no-upgrade"]).exit_code == 0
 
 
 @pytest.fixture
 def quick_doctor(monkeypatch):
     """The slow checks stood in for, so these tests are about the flag alone."""
-    from im_tools import checks
-    from im_tools.security import Survey
+    from im_course_tools import checks
+    from im_course_tools.security import Survey
     monkeypatch.setattr(checks.security, "survey", lambda _: Survey(products=[]))
     monkeypatch.setattr(checks, "run_briefly", lambda *a, **k: None)
     monkeypatch.setattr(checks, "search_briefly", lambda *a, **k: [])
@@ -421,7 +421,7 @@ def test_doctor_offline_never_reaches_for_a_new_version(monkeypatch, quick_docto
 
 
 def test_doctor_reports_which_im_this_is(monkeypatch):
-    from im_tools import checks
+    from im_course_tools import checks
     monkeypatch.setattr(checks.release, "describe",
                         lambda *a, **k: Install(CONDA_GLOBAL, "0.1.3", Path("/x")))
     monkeypatch.setattr(checks.release, "known_latest", lambda: None)
@@ -432,7 +432,7 @@ def test_doctor_reports_which_im_this_is(monkeypatch):
 
 
 def test_doctor_warns_when_a_newer_im_is_already_known_about(monkeypatch, tools):
-    from im_tools import checks
+    from im_course_tools import checks
     monkeypatch.setattr(checks.release, "describe",
                         lambda *a, **k: Install(PIP, "0.1.3", Path("/x")))
     monkeypatch.setattr(checks.release, "known_latest", lambda: "0.2.0")

@@ -14,10 +14,10 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from im_tools import checks, doctor, probe
-from im_tools.checks import FAIL, OK, WARN, Context
-from im_tools.cli import main
-from im_tools.security import Survey
+from im_course_tools import checks, doctor, probe
+from im_course_tools.checks import FAIL, OK, WARN, Context
+from im_course_tools.cli import main
+from im_course_tools.security import Survey
 
 
 @pytest.fixture

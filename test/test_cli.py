@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from im_tools.cli import main
+from im_course_tools.cli import main
 
 CHAPTERS = ["iteration", "lists"]
 PROJECTS = ["alignmentproject", "translationproject"]

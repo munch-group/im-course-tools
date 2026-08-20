@@ -1,6 +1,6 @@
 # Sphinx inventory version 2
-# Project: im-tools
+# Project: im-course-tools
 # Version: 0.0.9999
 # The remainder of this file is compressed using zlib.
-im_tools.modulename.functionname py:function 1 api/functionname.html#im_tools.modulename.functionname -
-im_tools.modulename.scriptname py:function 1 api/scriptname.html#im_tools.modulename.scriptname -
+im_course_tools.modulename.functionname py:function 1 api/functionname.html#im_course_tools.modulename.functionname -
+im_course_tools.modulename.scriptname py:function 1 api/scriptname.html#im_course_tools.modulename.scriptname -

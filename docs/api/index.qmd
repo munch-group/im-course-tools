@@ -7,7 +7,7 @@ Some description...
 
 | | |
 | --- | --- |
-| [functionname](functionname.qmd#im_tools.modulename.functionname) | The sum of two numbers. |
+| [functionname](functionname.qmd#im_course_tools.modulename.functionname) | The sum of two numbers. |
 
 ## Some other section
 
@@ -16,4 +16,4 @@ Some description...
 
 | | |
 | --- | --- |
-| [scriptname](scriptname.qmd#im_tools.modulename.scriptname) |  |
+| [scriptname](scriptname.qmd#im_course_tools.modulename.scriptname) |  |

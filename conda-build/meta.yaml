@@ -5,14 +5,14 @@ package:
   version: {{ pyproject.get("project").get("version") }}
 
 source:
-  git_url: https://github.com/munch-group/im-tools.git
+  git_url: https://github.com/munch-group/im-course-tools.git
 
 build:
   number: 0
   script: {{ PYTHON }} -m pip install . -vv
   noarch: python
   entry_points:
-    - im = im_tools.cli:main
+    - im = im_course_tools.cli:main
 
 requirements:
   host:
@@ -40,10 +40,10 @@ dependencies:   # keep this block with only these packages
 
 test:
   imports:
-    - im_tools
+    - im_course_tools
 
 about:
-  home: https://github.com/munch-group/im-tools.git
+  home: https://github.com/munch-group/im-course-tools.git
   license: MIT
-  dev_url: https://github.com/munch-group/im-tools.git
-  doc_url: https://munch-group.org/im-tools
+  dev_url: https://github.com/munch-group/im-course-tools.git
+  doc_url: https://munch-group.org/im-course-tools

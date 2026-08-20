@@ -18,4 +18,4 @@ Finally you should see the filter run when previewing your docs:
 
 Uninstall 
 
-    pip uninstall im-tools
+    pip uninstall im-course-tools
