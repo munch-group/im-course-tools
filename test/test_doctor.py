@@ -7,6 +7,7 @@ signed by an antivirus, one host blocked while the rest work — are exactly the
 ones that cannot be arranged on demand.
 """
 
+import json
 import platform
 from pathlib import Path
 
@@ -32,6 +33,20 @@ def course(tmp_path: Path) -> Path:
 @pytest.fixture
 def here(tmp_path: Path) -> Context:
     return Context(system=platform.system(), cwd=tmp_path)
+
+
+def build(course: Path, manifest: Path | None) -> Path:
+    """An installed environment, stamped with the manifest pixi built it from."""
+    env = course.joinpath(*checks.ENV_PATH)
+    python = env / "bin" / "python"
+    python.parent.mkdir(parents=True, exist_ok=True)
+    python.write_text("")
+    if manifest is not None:
+        record = env.joinpath(*checks.ENV_RECORD)
+        record.parent.mkdir(parents=True, exist_ok=True)
+        record.write_text(json.dumps({"manifest_path": str(manifest),
+                                      "environment_name": "default"}))
+    return python
 
 
 def statuses(findings) -> list[str]:
@@ -230,6 +245,44 @@ def test_a_manifest_newer_than_its_lock_file_warns(here, course):
     os.utime(lock, (0, 0))
     here.folder = course
     assert statuses(checks.environment_check(here)) == [OK, WARN]
+
+
+def test_an_environment_built_for_another_folder_is_a_failure(here, course):
+    here.env_python = build(course, manifest=course.parent / "old-name" / "pixi.toml")
+    here.folder = course
+    finding = checks.moved_check(here)
+    assert finding.status == FAIL
+    assert "pixi clean" in written([finding])
+    assert str(course.parent / "old-name") in written([finding])
+
+
+def test_an_environment_built_where_it_stands_is_fine(here, course):
+    here.env_python = build(course, manifest=course / "pixi.toml")
+    here.folder = course
+    assert checks.moved_check(here).status == OK
+
+
+def test_the_same_folder_reached_by_a_link_has_not_moved(here, course, tmp_path):
+    build(course, manifest=course / "pixi.toml")
+    link = tmp_path / "shortcut"
+    try:
+        link.symlink_to(course, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("this machine does not allow symlinks")
+    here.folder = link
+    here.env_python = link.joinpath(*checks.ENV_PATH, "bin", "python")
+    assert checks.moved_check(here).status == OK
+
+
+def test_an_environment_that_never_said_where_it_was_built_is_not_guessed_about(here, course):
+    here.env_python = build(course, manifest=None)
+    here.folder = course
+    assert checks.moved_check(here) is None
+
+
+def test_nothing_is_said_about_an_environment_that_is_not_there(here, course):
+    here.folder = course
+    assert checks.moved_check(here) is None
 
 
 def test_packages_missing_from_the_environment_are_named(here, course, monkeypatch):

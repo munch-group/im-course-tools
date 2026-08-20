@@ -13,6 +13,7 @@ student reading it is by definition having trouble reaching the website.
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 import shutil
@@ -41,6 +42,11 @@ EDITOR = "VS Code"
 
 # Where pixi puts the environment it builds from pixi.toml.
 ENV_PATH = (".pixi", "envs", "default")
+
+# The file pixi writes inside that environment naming the manifest it was built
+# from. It is written at install time and never afterwards, so it still names
+# the old folder once the folder has been moved.
+ENV_RECORD = ("conda-meta", "pixi")
 
 # Everything `im check` insists on, plus the one package that is not needed to
 # import anything but without which a notebook cannot run at all.
@@ -303,6 +309,36 @@ def missing_packages(python: Path, timeout: float = 120.0) -> list[str] | None:
     if output is None:
         return None
     return [line.strip() for line in output.splitlines() if line.strip()]
+
+
+def built_for(env: Path) -> Path | None:
+    """The folder pixi built this environment for, if the environment says.
+
+    pixi stamps the manifest's full path into the environment when it builds
+    it, and that stamp is the only thing on disk that still remembers where the
+    folder was standing at the time. Older environments, and any built by conda
+    rather than pixi, carry no stamp; those get None and no opinion.
+    """
+    try:
+        record = json.loads(env.joinpath(*ENV_RECORD).read_text(encoding="utf-8"))
+        manifest = record["manifest_path"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return Path(manifest).parent
+
+
+def same_folder(one: Path, other: Path) -> bool:
+    """Whether two paths are the same folder, however differently they are written.
+
+    Asking the filesystem is the only answer that survives a symlinked home
+    folder or a drive letter in the other case; it only works while both paths
+    exist, and when one of them no longer does, the folder has moved, which is
+    the answer anyway.
+    """
+    try:
+        return os.path.samefile(one, other)
+    except OSError:
+        return os.path.normcase(str(one)) == os.path.normcase(str(other))
 
 
 def scanning_advice(products) -> list[str]:
@@ -648,6 +684,44 @@ def environment_check(ctx: Context) -> list[Finding]:
     return findings
 
 
+def moved_check(ctx: Context) -> Finding | None:
+    """Whether the environment was built where the course folder now stands.
+
+    A pixi environment is not portable: the notebook kernel, and every command
+    installed into it, hold the folder's full path in plain text. Moving,
+    renaming or copying the course folder leaves all of them pointing at a
+    place that is not there, and the errors that follow name files a student
+    has never heard of rather than the folder they dragged last week.
+    """
+    if ctx.folder is None or ctx.env_python is None:
+        return None
+    origin = built_for(ctx.folder.joinpath(*ENV_PATH))
+    if origin is None:
+        return None
+    if same_folder(origin, ctx.folder):
+        return Finding(OK, ENVIRONMENT, "It was built for this folder")
+    return Finding(FAIL, ENVIRONMENT, "It was built for a different folder",
+                   [f"It was built for {origin}", f"but the course folder is {ctx.folder}"], [
+                       "The course folder has been moved, renamed, or copied since the",
+                       "environment was installed, and the environment did not come with",
+                       "it. It holds the old path in hundreds of places, among them the",
+                       "kernel every notebook starts, so notebooks and commands fail",
+                       "saying a file or an interpreter is not there.",
+                       "",
+                       "Build it again where the folder is now. In your course folder, run:",
+                       "",
+                       "    pixi clean",
+                       "    pixi install",
+                       "",
+                       "That throws the environment away and installs it from pixi.lock,",
+                       "which downloads a few gigabytes and takes several minutes. None of",
+                       "your own work is in the environment, so none of it is touched.",
+                       "",
+                       "If pixi does not know the `clean` command, delete the `.pixi`",
+                       "folder inside your course folder yourself and run `pixi install`.",
+                   ])
+
+
 def packages_check(ctx: Context) -> Finding | None:
     """Whether the course environment can import everything the course uses."""
     if ctx.env_python is None:
@@ -933,6 +1007,7 @@ CHECKS = (
     disk_check,
     pixi_check,
     environment_check,
+    moved_check,
     packages_check,
     interpreter_check,
     security_check,

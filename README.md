@@ -57,9 +57,12 @@ hundred people to run it. It looks at, in this order:
   whether anything can be written there at all; and whether there is room.
 - **pixi** — installed, and whether *this terminal* can see it, which is a
   different question and a much shorter fix.
-- **The environment** — built or not, its lock file current, every course
-  package importable *in that environment* rather than in whichever Python is
-  running `im`, and whether the `im` being run is the one inside it.
+- **The environment** — built or not, its lock file current, whether it was
+  built for the folder it is now sitting in, because a pixi environment holds
+  that folder's path in hundreds of places and a moved or renamed course folder
+  breaks every one of them; every course package importable *in that
+  environment* rather than in whichever Python is running `im`; and whether the
+  `im` being run is the one inside it.
 - **Security software** — on Windows by asking Windows' own Security Center,
   on macOS by looking where the dozen products a university laptop carries
   install themselves.
