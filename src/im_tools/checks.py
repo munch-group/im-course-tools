@@ -25,7 +25,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import environment, probe, security
+from . import environment, probe, release, security
 from .course import MARKER, CourseFolderNotFound, base_url, course_folder
 
 OK, WARN, FAIL = "ok", "warn", "fail"
@@ -33,6 +33,7 @@ OK, WARN, FAIL = "ok", "warn", "fail"
 # The headings a student reads down. A finding names the one it belongs under,
 # and the doctor prints them in the order the checks produce them.
 MACHINE = "This machine"
+TOOL = "The im command"
 FOLDER = "Your course folder"
 PIXI = "pixi"
 ENVIRONMENT = "The course environment"
@@ -399,6 +400,41 @@ def machine_check(ctx: Context) -> Finding:
                        "would about one of those. Everything may well be fine. Bring",
                        "anything that looks odd to class.",
                    ])
+
+
+def version_check(ctx: Context) -> Finding:
+    """Which `im` this is, how it got onto the machine, and whether it is current.
+
+    Only ever the answer already remembered from an earlier run, never a fresh
+    question: the command has one deliberate reason to touch the network and
+    this is not it, and by the time the checks run `im doctor` has asked
+    already.
+    """
+    install = release.describe()
+    detail = [f"{install.described}, in {install.prefix}"]
+    available = release.known_latest()
+
+    if release.newer(available, install.version):
+        advice = ["A fix to `im` itself reaches you through a release, and this",
+                  "one has not arrived here yet."]
+        prepared = release.upgrade_command(install)
+        if prepared is None:
+            advice.append(f"This copy is {install.described}, which cannot be upgraded")
+            advice.append("from here. Please bring that to class.")
+        else:
+            advice += ["", "Upgrade it with:", ""]
+            advice += [f"    {line}" for line in release.as_typed(prepared)]
+        return Finding(WARN, TOOL, f"im {install.version}, and {available} is out",
+                       detail, advice)
+
+    if install.kind == release.SOURCE:
+        return Finding(WARN, TOOL, f"im {install.version}, run from a checkout", detail, [
+            "The code being run is not the code that was installed, so nothing",
+            "would change if it were upgraded. That is right for whoever is",
+            "working on `im` and wrong for a student.",
+        ])
+
+    return Finding(OK, TOOL, f"im {install.version}", detail)
 
 
 def folder_check(ctx: Context) -> Finding:
@@ -1001,6 +1037,7 @@ def vscode_check(ctx: Context) -> list[Finding]:
 # two things that are somebody else's fault.
 CHECKS = (
     machine_check,
+    version_check,
     folder_check,
     path_checks,
     writable_check,

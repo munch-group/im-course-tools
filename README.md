@@ -84,9 +84,45 @@ website.
 im doctor                # the whole thing
 im doctor --offline      # skip the network checks
 im doctor --report       # also write im-doctor-report.txt to send to an instructor
+im doctor --no-upgrade   # do not offer to upgrade `im` itself first
 ```
 
 Warnings do not set the exit code; only failures do.
+
+## Keeping itself current
+
+A fix only reaches a hundred students if it arrives, and no student thinks of
+upgrading a tool that has never asked them to. So `im` asks on their behalf: at
+most once a day, on a background thread so no command ever waits for it, with
+the answer cached in the home folder rather than the course folder, which gets
+moved and copied and started over.
+
+Which index it asks depends on how this copy was installed, read off the machine
+rather than guessed — the conda record in the prefix, the shape of the path
+around it, or the absence of both. That same answer decides what is offered:
+
+| how it was installed | what upgrades it |
+| --- | --- |
+| conda package in a course environment | `pixi update im-course-tools` in the course folder |
+| `pixi global install` | `pixi global update im-course-tools` |
+| some other conda environment | `conda update -c <its own channel> -c conda-forge im-course-tools` |
+| pip | `<that interpreter> -m pip install --upgrade im-course-tools` |
+| pipx | `pipx upgrade im-course-tools` |
+| a checkout | nothing — the code being run is not the code installed |
+
+Every command prints one line when there is something newer, after its own
+output rather than before it. `im update` upgrades `im` first, since it is the
+command for putting the environment right and `im` is part of the environment.
+`im doctor` asks before doing it, because it otherwise changes nothing.
+
+Neither of them re-runs the command afterwards. `im` cannot replace the files it
+is running out of while it is running out of them — on Windows it plainly
+cannot — so what follows an upgrade is the command typed back out, to be run
+again. An upgrade that finishes cleanly is also checked to have actually changed
+the version, read fresh off disk: one that runs, succeeds and changes nothing
+would otherwise send a student round the same loop indefinitely.
+
+Set `IM_NO_UPDATE_CHECK=1` to switch the whole thing off.
 
 ### Installing it outside the course environment
 
@@ -109,8 +145,10 @@ pixi run test            # the test suite
 ```
 
 The tests run against a fake course website on disk, reached through a `file://`
-URL, so they never touch the real site. `IM_COURSE_URL` and `IM_COURSE_FOLDER`
-are the two overrides they use, and they work by hand too:
+URL, so they never touch the real site, and a suite-wide fixture sets
+`IM_NO_UPDATE_CHECK` so no test asks a package index anything. `IM_COURSE_URL`
+and `IM_COURSE_FOLDER` are the two overrides they use, and they work by hand
+too:
 
 ```bash
 IM_COURSE_URL=file:///path/to/_book im get iteration

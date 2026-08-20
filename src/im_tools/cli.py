@@ -19,7 +19,7 @@ import urllib.error
 
 import click
 
-from . import environment, notebooks, projects
+from . import environment, notebooks, projects, release
 from .course import CourseFolderNotFound, course_folder
 from .doctor import diagnose
 
@@ -60,6 +60,9 @@ def _catalog(offering) -> tuple[list, Exception | None]:
 @click.version_option(__version__, "-V", "--version", prog_name="im")
 def main() -> None:
     """Tools for the Instructing Machines course."""
+    # Asked in the background and said at the end, so that no command waits on
+    # it. A fix only reaches a student who knows there is one.
+    release.announce_later(click.echo)
 
 
 @main.command()
@@ -73,12 +76,24 @@ def check() -> None:
               help="Also write a file to send to your instructor.")
 @click.option("--offline", is_flag=True,
               help="Skip the checks that need the internet.")
-def doctor(report: bool, offline: bool) -> None:
+@click.option("--upgrade/--no-upgrade", default=None,
+              help="Upgrade `im` first, or leave it, without being asked.")
+def doctor(report: bool, offline: bool, upgrade: bool | None) -> None:
     """Work out why the course setup is not working.
 
     Unlike the other commands this one runs anywhere, because not being in the
     course folder is one of the things it is there to notice.
+
+    The one thing it will change is `im` itself: a stale `im` is the one fault
+    that would otherwise be diagnosed by the very code that has the bug. It
+    asks first, and everything else it only reads.
     """
+    if not offline and upgrade is not False:
+        asking = (lambda question: click.confirm(question, default=True)) \
+            if upgrade is None else None
+        stop = release.upgrade_if_newer(click.echo, confirm=asking)
+        if stop is not None:
+            raise SystemExit(stop)
     raise SystemExit(diagnose(click.echo, offline=offline, report=report,
                               version=__version__))
 
@@ -146,9 +161,19 @@ def get(name: str | None) -> None:
 
 
 @main.command()
-def update() -> None:
+@click.option("--no-upgrade", is_flag=True,
+              help="Do not upgrade `im` itself first.")
+def update(no_upgrade: bool) -> None:
     """Refresh the course environment from the website."""
     folder = _folder()
+
+    # `im update` is the command for putting the environment right, and `im`
+    # is part of the environment. Upgrading it first means the refresh that
+    # follows is done by the current code rather than by the code being fixed.
+    if not no_upgrade:
+        stop = release.upgrade_if_newer(click.echo)
+        if stop is not None:
+            raise SystemExit(stop)
     try:
         raise SystemExit(environment.update(folder, click.echo))
     except urllib.error.URLError as error:
