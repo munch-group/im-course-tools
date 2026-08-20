@@ -1,1 +1,1 @@
-Sitemap: https://munch-group.github.io/im-tools/sitemap.xml
+Sitemap: https://munch-group.github.io/im-course-tools/sitemap.xml
