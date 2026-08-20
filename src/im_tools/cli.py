@@ -1,6 +1,7 @@
 """The `im` command: the one terminal tool the course asks students to learn.
 
     im check                 is my environment working?
+    im doctor                why is it not working?
     im get iteration         a chapter notebook
     im get alignmentproject  a whole project
     im get                   everything on offer
@@ -20,6 +21,7 @@ import click
 
 from . import environment, notebooks, projects
 from .course import CourseFolderNotFound, course_folder
+from .doctor import diagnose
 
 try:                                            # installed metadata, not a constant
     from importlib.metadata import version as _version
@@ -64,6 +66,21 @@ def main() -> None:
 def check() -> None:
     """Check that the course environment is complete."""
     raise SystemExit(environment.check(click.echo))
+
+
+@main.command()
+@click.option("--report", is_flag=True,
+              help="Also write a file to send to your instructor.")
+@click.option("--offline", is_flag=True,
+              help="Skip the checks that need the internet.")
+def doctor(report: bool, offline: bool) -> None:
+    """Work out why the course setup is not working.
+
+    Unlike the other commands this one runs anywhere, because not being in the
+    course folder is one of the things it is there to notice.
+    """
+    raise SystemExit(diagnose(click.echo, offline=offline, report=report,
+                              version=__version__))
 
 
 @main.command()
