@@ -14,9 +14,9 @@ with open('pyproject.toml', 'rb') as f:
   data = tomllib.load(f)
 print(data['project']['version'])
 ") || exit
-p=$(python -c "'--prerelease' if 'rc' in \"$v\" else '--latest' ") || exit
+p=$(python -c "print('--prerelease' if 'rc' in \"$v\" else '--latest')") || exit
 
-repo=$(basename $(git rev-parse --show-toplevel))
+repo=$(basename -s .git "$(git remote get-url origin)")
 gh repo set-default https://github.com/munch-group/${repo} \
   && gh release create $p "v${v}" --title "v${v}" --notes "" \
   && echo -e "${GREEN}Released version v${v} ${NC}" \
