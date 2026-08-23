@@ -19,6 +19,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import textwrap
 import threading
 import time
 import urllib.parse
@@ -119,6 +120,14 @@ class Context:
     offline: bool = False
     folder: Path | None = None
     env_python: Path | None = None
+    pixi: str | None = None
+    # The look at the network, kept because two checks read it. None until it
+    # has been taken, which is not the same as taken and found nothing.
+    probes: list[probe.Probe] | None = None
+    download: probe.Download | None = None
+    # The title of the finding that has already explained inspected traffic, so
+    # that the next one to want that paragraph points at it instead.
+    explained: str | None = None
 
 
 # --- small things the checks need ------------------------------------------ #
@@ -342,9 +351,98 @@ def same_folder(one: Path, other: Path) -> bool:
         return os.path.normcase(str(one)) == os.path.normcase(str(other))
 
 
-def scanning_advice(products) -> list[str]:
-    """The paragraph that explains inspected traffic, named after what is here."""
+# What the two checks that care about the network make of it between them.
+CLEAR = "clear"       # pixi's downloads arrive, signed by authorities pixi knows
+TROUBLE = "trouble"   # something is intercepting them, blocking them, or losing them
+UNSEEN = "unseen"     # nobody looked, so neither of those can be claimed
+
+
+def looked_at_the_network(ctx: Context):
+    """The one look at the network, taken once and read by two checks.
+
+    The security check cannot say whether what is installed is in the way until
+    somebody has looked, and the internet check has to look anyway. Asking
+    twice would both double the slowest part of the command and leave two
+    answers free to disagree with each other.
+    """
+    if ctx.probes is None:
+        if ctx.offline:
+            ctx.probes, ctx.download = [], probe.Download(probe.NOT_TRIED)
+        else:
+            hosts = list(probe.HOSTS)
+            site = urllib.parse.urlsplit(base_url()).hostname
+            if site:
+                hosts.append(site)
+            ctx.probes = probe.probe_all(hosts)
+            # If not one host answered there is nothing for pixi to download
+            # from either, and asking it anyway costs three retries and most of
+            # a minute to be told what is already on the screen.
+            silent = all(result.outcome in (probe.UNRESOLVED, probe.UNREACHABLE)
+                         for result in ctx.probes)
+            ctx.download = (probe.Download(probe.NOT_TRIED) if silent
+                            else probe.pixi_download(ctx.pixi))
+    return ctx.probes, ctx.download
+
+
+def network_verdict(probes, download) -> str:
+    """Whether anything is standing between pixi and the internet.
+
+    Being installed is not evidence of anything. Most laptops in a lecture
+    theatre carry security software and most of them install the course
+    environment without it ever mattering, so what turns "you have Bitdefender"
+    into something worth doing is a certificate pixi refuses or a download that
+    does not arrive.
+    """
+    # A machine with no connection at all says nothing about what would happen
+    # to a connection it had, and blaming the antivirus for switched-off wifi
+    # is exactly the kind of confident wrong answer this is trying to avoid.
+    if probes and all(result.outcome in (probe.UNRESOLVED, probe.UNREACHABLE)
+                      for result in probes):
+        return UNSEEN
+
+    intercepted = any(result.outcome == probe.INTERCEPTED for result in probes)
+    blocked = any(result.outcome in (probe.UNRESOLVED, probe.UNREACHABLE)
+                  for result in probes)
+    if download.ok:
+        # pixi got through, which settles the certificate question in pixi's
+        # own terms: the probes above are opened by Python, and a Python that
+        # cannot find its own list of authorities makes every host look
+        # tampered with on a machine where nothing is. A certificate signed by
+        # a product by name, and a host that never answered, are still worth
+        # asking about; a certificate this Python could not check is not.
+        return TROUBLE if intercepted or blocked else CLEAR
+    if download.failed or any(not result.ok for result in probes):
+        return TROUBLE
+    return CLEAR if probes else UNSEEN
+
+
+def interception_title(vendors) -> str:
+    """The line the internet check prints when a certificate names a product.
+
+    Known here as well as there because a check that decides not to explain
+    something has to be able to say where the explanation went instead.
+    """
+    return f"{' and '.join(vendors)} is opening pixi's downloads on the way in"
+
+
+def scanning_advice(ctx: Context, products, title: str) -> list[str]:
+    """The paragraph that explains inspected traffic, named after what is here.
+
+    Written out once per run and pointed at after that. The security check and
+    the internet checks reach this advice from different evidence and are
+    frequently both right at the same time, and a student who meets the same
+    twenty lines twice in one numbered list learns nothing the second time.
+
+    Which of them writes it out is settled by `ctx.explained`, holding the
+    title of the finding it belongs to. A check that knows another finding will
+    make the point better can name that one there before asking for its own
+    advice, and gets the pointer instead.
+    """
     named = " and ".join(products) if products else "your antivirus"
+    if ctx.explained and ctx.explained != title:
+        return textwrap.wrap(f'This is the same thing as "{ctx.explained}" in this '
+                             "list, and what to change is listed there.", 70)
+    ctx.explained = title
     return [
         "Security software that inspects encrypted traffic is the most common",
         "reason `pixi install` fails on a laptop whose browser works perfectly.",
@@ -653,6 +751,9 @@ def pixi_check(ctx: Context) -> Finding:
     """Whether pixi is installed, and whether this terminal can see it."""
     executable = shutil.which("pixi")
     if executable is not None:
+        # Kept for the network check, which asks this pixi in particular to
+        # download something rather than looking it up again.
+        ctx.pixi = executable
         version = (run_briefly([executable, "--version"], 15) or "").strip()
         return Finding(OK, PIXI, version or "pixi is installed", [executable])
 
@@ -807,12 +908,30 @@ def interpreter_check(ctx: Context) -> Finding | None:
 
 
 def security_check(ctx: Context) -> list[Finding]:
-    """What security software is installed, and whether it is the kind that bites."""
+    """What security software is installed, and whether it is actually in the way.
+
+    Installed is not the same as guilty, and this check used to treat it as if
+    it were: every student carrying Bitdefender was handed a job of work —
+    exclusions, scanning turned off, protection paused — including the large
+    majority whose install had failed for some entirely unrelated reason, and a
+    numbered list that tells a hundred people to do something only three of
+    them need is a list nobody reads to the bottom of.
+
+    So the paragraph now waits for evidence, which is what the internet checks
+    collect: a certificate pixi refuses, or a download of pixi's own that never
+    arrives. Until then what is installed is a line in the scan and nothing
+    more.
+    """
     findings: list[Finding] = []
     result = security.survey(ctx.system)
+    probes, download = looked_at_the_network(ctx)
+    verdict = network_verdict(probes, download)
 
     if not result.asked:
-        if ctx.system == "Windows":
+        if ctx.system == "Windows" and verdict == CLEAR:
+            findings.append(Finding(OK, SECURITY, "Windows would not say what is running",
+                                    ["Whatever is here, pixi's downloads are getting past it"]))
+        elif ctx.system == "Windows":
             findings.append(Finding(WARN, SECURITY, "Windows would not say what is running",
                                     ["The Security Center could not be asked"], [
                                         "If `pixi install` is failing with a certificate or network",
@@ -820,8 +939,45 @@ def security_check(ctx: Context) -> list[Finding]:
                                         "most common cause and this check could not rule them out.",
                                     ]))
     elif result.third_party:
-        findings.append(Finding(WARN, SECURITY, "Third-party security software is installed",
-                                result.third_party, scanning_advice(result.third_party)))
+        # One product is worth naming in the line a student reads; three are a
+        # list, and the list belongs underneath it.
+        named = (result.third_party[0] if len(result.third_party) == 1
+                 else "Third-party security software")
+        listed = result.third_party if len(result.third_party) > 1 else []
+
+        if verdict == TROUBLE:
+            title = f"{named} may be why pixi cannot get through"
+            # A certificate that names the product outright is better evidence
+            # than a folder on disk, and the internet check is about to present
+            # it. Where there is one, it does the explaining and this line
+            # points at it rather than saying the same thing first.
+            vendors = sorted({seen.vendor for seen in probes
+                              if seen.outcome == probe.INTERCEPTED and seen.vendor})
+            if vendors:
+                ctx.explained = interception_title(vendors)
+            findings.append(Finding(WARN, SECURITY, title, listed,
+                                    scanning_advice(ctx, result.third_party, title)))
+        elif verdict == CLEAR:
+            # Only one of these two is evidence about pixi itself, so only one
+            # of them gets to say so.
+            settled = (f"{named} is installed, and is letting pixi through",
+                       "pixi's own download went through") if download.ok else \
+                      (f"{named} is installed, and nothing suggests it is in the way",
+                       "Every certificate came from a public authority")
+            findings.append(Finding(OK, SECURITY, settled[0], listed + [settled[1]]))
+        else:
+            why = ("--offline was asked for" if ctx.offline
+                   else "nothing could be reached to test it against")
+            findings.append(Finding(WARN, SECURITY, f"{named} is installed", listed, [
+                *textwrap.wrap(f"Whether it is in pixi's way was not checked, "
+                               f"because {why}.", 70),
+                "",
+                "Run `im doctor` again with a working connection and without",
+                "--offline. It looks at who signed pixi's connections and makes",
+                "pixi fetch a file itself, which is what tells apart security",
+                "software that is interfering from security software that is",
+                "merely installed.",
+            ]))
     elif result.built_in:
         findings.append(Finding(OK, SECURITY,
                                 f"{result.built_in[0]} only, which does not get in the way"))
@@ -879,11 +1035,7 @@ def network_check(ctx: Context) -> list[Finding]:
             "to be. Run `im doctor` without --offline once you have a connection.",
         ])]
 
-    hosts = list(probe.HOSTS)
-    site = urllib.parse.urlsplit(base_url()).hostname
-    if site:
-        hosts.append(site)
-    results = probe.probe_all(hosts)
+    results, download = looked_at_the_network(ctx)
     if not results:
         return []
 
@@ -909,17 +1061,34 @@ def network_check(ctx: Context) -> list[Finding]:
     findings: list[Finding] = []
 
     intercepted = grouped.get(probe.INTERCEPTED, [])
+    vendors = sorted({result.vendor for result in intercepted if result.vendor})
     if intercepted:
-        vendors = sorted({result.vendor for result in intercepted if result.vendor})
+        title = interception_title(vendors)
         findings.append(Finding(
-            FAIL, INTERNET,
-            f"{' and '.join(vendors)} is opening pixi's downloads on the way in",
+            FAIL, INTERNET, title,
             [f"{result.host}: the certificate says it was issued by {result.issuer}"
              for result in intercepted],
-            scanning_advice(vendors)))
+            scanning_advice(ctx, vendors, title)))
 
     unverified = grouped.get(probe.UNVERIFIED, [])
-    if unverified:
+    if unverified and download.ok:
+        # pixi fetched a file from one of these same hosts while this was being
+        # checked, so nothing is sitting between the machine and the internet.
+        # What cannot check a certificate is the Python running `im`, which is
+        # a real fault and a much smaller one.
+        findings.append(Finding(
+            WARN, INTERNET, "The Python running `im` cannot verify certificates",
+            [f"{result.host}: {result.error}" for result in unverified], [
+                "pixi downloaded a file of its own from one of these hosts while",
+                "this was being checked, so this is not something standing between",
+                "the machine and the internet. It is this Python looking for the",
+                "list of certificate authorities somewhere it is not.",
+                "",
+                "`pixi install` does not use it and is unaffected. `im get` and",
+                "`im update` do, and will fail. Rebuilding the environment with",
+                "`pixi install` in your course folder puts a fresh list back.",
+            ]))
+    elif unverified:
         findings.append(Finding(
             FAIL, INTERNET, "The certificates for some hosts could not be verified",
             [f"{result.host}: {result.error}" for result in unverified], [
@@ -970,6 +1139,40 @@ def network_check(ctx: Context) -> list[Finding]:
                 "Try a phone hotspot. If it works there, the block is on this",
                 "network; if it fails there too, it is on this machine.",
             ]))
+
+    # Everything above this line was asked with Python, which trusts what the
+    # operating system trusts and can be waved through where pixi is not. This
+    # is pixi being asked the same question in its own words, and it is the
+    # answer that actually decides whether an install can work.
+    if download.outcome == probe.REFUSED:
+        title = "pixi's own download was refused over a certificate"
+        findings.append(Finding(FAIL, INTERNET, title, download.lines,
+                                scanning_advice(ctx, vendors, title)))
+    elif download.outcome in (probe.STOPPED, probe.SLOW):
+        findings.append(Finding(
+            FAIL, INTERNET, "pixi's own download did not get through",
+            download.lines, [
+                "This is the program that fails for you, failing here in the same",
+                "way, so whatever is stopping it is stopping `pixi install` too.",
+                "",
+                "A firewall, the network protection part of an antivirus, or a",
+                "university network that only allows web browsing will each do",
+                "this. Try a phone hotspot: if it works there, the block is on this",
+                "network, and if it fails there too, it is on this machine.",
+            ]))
+    elif download.outcome == probe.PUZZLING:
+        findings.append(Finding(
+            WARN, INTERNET, "pixi could not finish a test download",
+            download.lines, [
+                "pixi was asked to fetch one small file and did not manage it, for",
+                "a reason this check does not recognise. If `pixi install` works in",
+                "your course folder, ignore this; if it does not, bring these lines",
+                "to class.",
+            ]))
+    elif download.ok:
+        findings.append(Finding(
+            OK, INTERNET, "pixi downloaded a file of its own without trouble",
+            ["from conda.anaconda.org, into a cache thrown away afterwards"]))
 
     if reached:
         findings.append(Finding(

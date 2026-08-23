@@ -9,6 +9,7 @@ ones that cannot be arranged on demand.
 
 import json
 import platform
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -88,6 +89,71 @@ def test_the_authorities_the_course_hosts_actually_use_are_recognised():
 
 def test_an_authority_nobody_has_heard_of_is_not_waved_through():
     assert not probe.public_authority("Some Company Root CA")
+
+
+# --- asking pixi itself ----------------------------------------------------- #
+
+BOXED = """Using channels: conda-forge
+Error:   × Request failed after 3 retries
+  ├─▶ error sending request for url (https://conda.anaconda.org/conda-forge/
+  │   noarch/repodata_shards.msgpack.zst)
+  ├─▶ client error (Connect)
+  ╰─▶ invalid peer certificate: UnknownIssuer
+"""
+
+
+def test_pixis_error_survives_being_taken_out_of_its_box():
+    """It is drawn as a tree and wrapped mid-url, and neither travels."""
+    lines = probe.readable(BOXED)
+    assert lines[0] == "Request failed after 3 retries"
+    assert lines[-1] == "invalid peer certificate: UnknownIssuer"
+    assert "conda-forge/noarch/repodata_shards.msgpack.zst)" in lines[1]
+
+
+class Finished:
+    """What subprocess.run would have handed back."""
+
+    def __init__(self, returncode, stderr=""):
+        self.returncode, self.stderr, self.stdout = returncode, stderr, ""
+
+
+def fake_pixi(monkeypatch, answer):
+    monkeypatch.setattr(probe.shutil, "which", lambda _: "/somewhere/pixi")
+    if isinstance(answer, Exception):
+        def run(*a, **k):
+            raise answer
+    else:
+        def run(*a, **k):
+            return answer
+    monkeypatch.setattr(probe.subprocess, "run", run)
+
+
+@pytest.mark.parametrize("said, outcome", [
+    ("invalid peer certificate: UnknownIssuer", probe.REFUSED),
+    ("tcp connect error: Connection refused (os error 61)", probe.STOPPED),
+    ("error: unrecognised option '--platform'", probe.PUZZLING),
+])
+def test_the_way_pixi_failed_is_told_apart(monkeypatch, said, outcome):
+    fake_pixi(monkeypatch, Finished(1, said))
+    assert probe.pixi_download().outcome == outcome
+
+
+def test_pixi_downloading_is_the_whole_answer(monkeypatch):
+    fake_pixi(monkeypatch, Finished(0))
+    assert probe.pixi_download().ok
+
+
+def test_pixi_still_trying_is_not_pixi_succeeding(monkeypatch):
+    fake_pixi(monkeypatch, subprocess.TimeoutExpired("pixi", 45))
+    assert probe.pixi_download(timeout=45).outcome == probe.SLOW
+
+
+def test_without_pixi_the_question_is_not_asked_rather_than_answered(monkeypatch):
+    """Not asked and nothing wrong have to stay different answers."""
+    monkeypatch.setattr(probe.shutil, "which", lambda _: None)
+    result = probe.pixi_download()
+    assert result.outcome == probe.NOT_TRIED
+    assert not result.ok and not result.failed
     assert not probe.public_authority(None)
 
 
@@ -309,21 +375,80 @@ def test_a_globally_installed_im_says_so(here, course):
 
 # --- security software ------------------------------------------------------ #
 
-def test_third_party_antivirus_is_worth_a_warning(here, monkeypatch):
+def installed(here, monkeypatch, products, survey=None):
+    """A machine carrying `products`, with the ransomware setting off."""
     monkeypatch.setattr(checks.security, "survey",
-                        lambda _: Survey(products=["Kaspersky Internet Security"]))
+                        lambda _: survey or Survey(products=products))
     monkeypatch.setattr(checks.security, "controlled_folder_access", lambda: False)
+
+
+def answered(here, results=None, download=None):
+    """The look at the network, already taken, so that no check takes one.
+
+    Setting both is what makes `looked_at_the_network` believe it has already
+    happened, which is the point: none of these tests may touch a socket.
+    """
+    here.probes = [probe.Probe("conda.anaconda.org", probe.REACHED, issuer="DigiCert Inc")] \
+        if results is None else results
+    here.download = probe.Download(probe.DOWNLOADED) if download is None else download
+
+
+def test_antivirus_that_is_only_installed_is_not_a_job_to_do(here, monkeypatch):
+    """The whole point: nearly every laptop has one and nearly none is at fault."""
+    installed(here, monkeypatch, ["Bitdefender Total Security"])
+    answered(here)
+    findings = checks.security_check(here)
+    assert statuses(findings) == [OK]
+    assert "Bitdefender" in written(findings)
+    assert "exclusions" not in written(findings)
+
+
+def test_antivirus_that_is_in_the_way_gets_the_whole_paragraph(here, monkeypatch):
+    installed(here, monkeypatch, ["Kaspersky Internet Security"])
+    answered(here, download=probe.Download(probe.REFUSED, ["invalid peer certificate"]))
     findings = checks.security_check(here)
     assert statuses(findings) == [WARN]
     assert "Kaspersky" in written(findings)
     assert "exclusions" in written(findings)
 
 
+def test_a_blocked_host_is_enough_to_ask_about_the_antivirus(here, monkeypatch):
+    installed(here, monkeypatch, ["ESET Security", "Little Snitch"])
+    answered(here, results=[
+        probe.Probe("conda.anaconda.org", probe.UNREACHABLE, error="timed out"),
+        probe.Probe("github.com", probe.REACHED, issuer="DigiCert Inc"),
+    ])
+    findings = checks.security_check(here)
+    assert statuses(findings) == [WARN]
+    assert "ESET Security" in written(findings)      # both are named underneath
+    assert "Little Snitch" in written(findings)
+
+
+def test_no_connection_at_all_is_not_blamed_on_the_antivirus(here, monkeypatch):
+    """Switched-off wifi is not evidence about anything else."""
+    installed(here, monkeypatch, ["Norton 360"])
+    answered(here, results=[probe.Probe(host, probe.UNREACHABLE, error="timed out")
+                            for host in ("pypi.org", "github.com")],
+             download=probe.Download(probe.NOT_TRIED))
+    findings = checks.security_check(here)
+    assert statuses(findings) == [WARN]
+    assert "exclusions" not in written(findings)
+    assert "was not checked" in written(findings)
+
+
+def test_offline_says_it_could_not_tell_rather_than_guessing(here, monkeypatch):
+    here.offline = True
+    installed(here, monkeypatch, ["Norton 360"])
+    findings = checks.security_check(here)
+    assert statuses(findings) == [WARN]
+    assert "exclusions" not in written(findings)
+    assert "--offline" in written(findings)
+
+
 def test_the_antivirus_windows_comes_with_is_not_worth_one(here, monkeypatch):
     here.system = "Windows"
-    monkeypatch.setattr(checks.security, "survey",
-                        lambda _: Survey(products=["Windows Defender"]))
-    monkeypatch.setattr(checks.security, "controlled_folder_access", lambda: False)
+    installed(here, monkeypatch, ["Windows Defender"])
+    answered(here)
     assert statuses(checks.security_check(here)) == [OK]
 
 
@@ -331,15 +456,25 @@ def test_windows_refusing_to_say_is_not_read_as_nothing_installed(here, monkeypa
     here.system = "Windows"
     monkeypatch.setattr(checks.security, "survey", lambda _: Survey(asked=False))
     monkeypatch.setattr(checks.security, "controlled_folder_access", lambda: None)
+    answered(here, download=probe.Download(probe.STOPPED, ["tcp connect error"]))
     findings = checks.security_check(here)
     assert statuses(findings) == [WARN]
     assert "could not rule them out" in written(findings)
+
+
+def test_windows_refusing_to_say_is_let_go_when_pixi_is_getting_through(here, monkeypatch):
+    here.system = "Windows"
+    monkeypatch.setattr(checks.security, "survey", lambda _: Survey(asked=False))
+    monkeypatch.setattr(checks.security, "controlled_folder_access", lambda: False)
+    answered(here)
+    assert statuses(checks.security_check(here)) == [OK]
 
 
 def test_controlled_folder_access_is_reported_separately(here, monkeypatch):
     here.system = "Windows"
     monkeypatch.setattr(checks.security, "survey", lambda _: Survey(products=[]))
     monkeypatch.setattr(checks.security, "controlled_folder_access", lambda: True)
+    answered(here)
     assert statuses(checks.security_check(here)) == [OK, WARN]
 
 
@@ -351,9 +486,11 @@ def test_defender_is_told_apart_from_the_rest():
 
 # --- the network ------------------------------------------------------------ #
 
-def fake_probes(here, monkeypatch, results):
+def fake_probes(here, monkeypatch, results, download=None):
     monkeypatch.setattr(checks.probe, "probe_all", lambda hosts, **kw: results)
     monkeypatch.setattr(checks.probe, "clock_offset", lambda *a, **k: 0.0)
+    monkeypatch.setattr(checks.probe, "pixi_download",
+                        lambda *a, **k: download or probe.Download(probe.DOWNLOADED))
 
 
 def test_offline_skips_the_network_but_says_why(here):
@@ -379,10 +516,28 @@ def test_a_certificate_that_will_not_verify_is_a_failure(here, monkeypatch):
     fake_probes(here, monkeypatch, [
         probe.Probe("pypi.org", probe.UNVERIFIED, error="self signed certificate"),
         probe.Probe("github.com", probe.REACHED, issuer="DigiCert Inc"),
-    ])
+    ], download=probe.Download(probe.NOT_TRIED))
     findings = checks.network_check(here)
     assert findings[0].status == FAIL
     assert "clock" in written(findings)
+
+
+def test_a_certificate_only_this_python_cannot_check_is_a_smaller_thing(here, monkeypatch):
+    """A conda environment that has been moved loses its own list of authorities.
+
+    Every host then looks tampered with to `im` and none of them is, which the
+    old wording called a failure and told the student to pause their antivirus
+    over. pixi fetching a file from the same host while this was being checked
+    is what tells the two apart.
+    """
+    fake_probes(here, monkeypatch, [
+        probe.Probe("pypi.org", probe.UNVERIFIED, error="unable to get local issuer"),
+        probe.Probe("github.com", probe.REACHED, issuer="DigiCert Inc"),
+    ])
+    findings = checks.network_check(here)
+    assert FAIL not in statuses(findings)
+    assert "im update" in written(findings)
+    assert "pause your antivirus" not in written(findings)
 
 
 def test_an_unfamiliar_authority_is_only_a_warning(here, monkeypatch):
@@ -416,12 +571,56 @@ def test_one_blocked_host_is_told_apart_from_being_offline(here, monkeypatch):
 
 
 def test_a_wrong_clock_is_noticed(here, monkeypatch):
-    monkeypatch.setattr(checks.probe, "probe_all",
-                        lambda hosts, **kw: [probe.Probe("github.com", probe.REACHED,
-                                                         issuer="DigiCert Inc")])
+    fake_probes(here, monkeypatch,
+                [probe.Probe("github.com", probe.REACHED, issuer="DigiCert Inc")])
     monkeypatch.setattr(checks.probe, "clock_offset", lambda *a, **k: 7200.0)
     findings = checks.network_check(here)
     assert "clock is wrong" in written(findings)
+
+
+def test_pixi_downloading_for_itself_is_the_line_that_settles_it(here, monkeypatch):
+    fake_probes(here, monkeypatch,
+                [probe.Probe("github.com", probe.REACHED, issuer="DigiCert Inc")])
+    findings = checks.network_check(here)
+    assert "pixi downloaded a file of its own" in written(findings)
+    assert FAIL not in statuses(findings)
+
+
+def test_a_certificate_pixi_will_not_accept_is_a_failure(here, monkeypatch):
+    """Python trusts what the machine trusts; pixi does not, and pixi is the one failing."""
+    fake_probes(here, monkeypatch,
+                [probe.Probe("github.com", probe.REACHED, issuer="DigiCert Inc")],
+                download=probe.Download(probe.REFUSED,
+                                        ["invalid peer certificate: UnknownIssuer"]))
+    findings = checks.network_check(here)
+    assert FAIL in statuses(findings)
+    assert "invalid peer certificate: UnknownIssuer" in written(findings)
+    assert "HTTPS or SSL scanning" in written(findings)
+
+
+def test_pixi_failing_for_a_reason_nobody_listed_is_only_a_warning(here, monkeypatch):
+    fake_probes(here, monkeypatch,
+                [probe.Probe("github.com", probe.REACHED, issuer="DigiCert Inc")],
+                download=probe.Download(probe.PUZZLING, ["error: something new"]))
+    findings = checks.network_check(here)
+    assert FAIL not in statuses(findings)
+    assert "error: something new" in written(findings)
+
+
+def test_the_long_paragraph_is_written_out_once_and_pointed_at_after(here, monkeypatch):
+    """Two checks, both right, and one explanation between them."""
+    installed(here, monkeypatch, ["Kaspersky Internet Security"])
+    fake_probes(here, monkeypatch, [
+        probe.Probe("conda.anaconda.org", probe.INTERCEPTED,
+                    issuer="Kaspersky Web Anti-Virus", vendor="Kaspersky"),
+        probe.Probe("github.com", probe.REACHED, issuer="DigiCert Inc"),
+    ], download=probe.Download(probe.REFUSED, ["invalid peer certificate"]))
+
+    first = checks.security_check(here)
+    second = checks.network_check(here)
+    everything = written(first + second)
+    assert everything.count("add your course folder to whatever it calls") == 1
+    assert everything.count("This is the same thing as") == 2         # both later findings
 
 
 # --- putting it together ---------------------------------------------------- #
@@ -437,6 +636,36 @@ def test_a_clean_run_says_so_and_succeeds():
         checks.Finding(OK, checks.MACHINE, "macOS")))
     assert code == 0
     assert "Nothing here looks wrong" in "\n".join(lines)
+
+
+def test_the_scan_shows_only_what_is_wrong():
+    lines = []
+    doctor.diagnose(lines.append, checks=quiet(
+        checks.Finding(OK, checks.MACHINE, "macOS"),
+        checks.Finding(WARN, checks.PIXI, "something to fix", advice=["fix it"])))
+    printed = "\n".join(lines)
+    assert "macOS" not in printed
+    assert "something to fix" in printed
+    assert "1 other thing was looked at and found fine." in printed
+
+
+def test_verbose_shows_everything_that_was_looked_at():
+    lines = []
+    doctor.diagnose(lines.append, verbose=True, checks=quiet(
+        checks.Finding(OK, checks.MACHINE, "macOS"),
+        checks.Finding(WARN, checks.PIXI, "something to fix", advice=["fix it"])))
+    printed = "\n".join(lines)
+    assert "macOS" in printed
+    assert "looked at and found fine" not in printed
+
+
+def test_the_report_holds_the_lines_the_screen_left_out(tmp_path, monkeypatch):
+    """The person reading a report is looking for what was ruled out."""
+    monkeypatch.setenv("IM_COURSE_FOLDER", str(tmp_path))
+    doctor.diagnose(lambda _: None, report=True, cwd=tmp_path, checks=quiet(
+        checks.Finding(OK, checks.MACHINE, "macOS"),
+        checks.Finding(FAIL, checks.PIXI, "pixi is not installed", advice=["install it"])))
+    assert "macOS" in (tmp_path / doctor.REPORT_NAME).read_text()
 
 
 def test_a_warning_on_its_own_does_not_fail_the_command():
@@ -462,12 +691,12 @@ def test_a_check_that_crashes_costs_only_itself():
         raise RuntimeError("a corner nobody foresaw")
 
     lines = []
-    code = doctor.diagnose(lines.append, checks=[
+    code = doctor.diagnose(lines.append, verbose=True, checks=[
         explodes, lambda ctx: checks.Finding(OK, checks.PIXI, "pixi 0.53.0")])
     assert code == 0                      # a fault in the doctor is not a fault in the setup
     printed = "\n".join(lines)
     assert "could not be run" in printed
-    assert "pixi 0.53.0" in printed
+    assert "pixi 0.53.0" in printed       # the check after the crash still ran
 
 
 def test_the_report_holds_the_findings_and_no_secrets(tmp_path, monkeypatch):

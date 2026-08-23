@@ -13,16 +13,27 @@ own list, compiled in, which nothing can install itself into.
 
 So "the internet works" is not an answer a student can act on. Who signed the
 certificate is the part that explains the failure, and that is what this asks.
+
+It asks twice over. The connections here are opened by Python, which trusts a
+different list of authorities on every operating system and can therefore be
+let through where pixi is turned away, so the last thing this module does is
+make pixi itself fetch something and watch what happens. That is the only
+question really being asked: whether the program that fails for the student can
+download.
 """
 
 from __future__ import annotations
 
+import os
+import shutil
 import socket
 import ssl
+import subprocess
+import tempfile
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
@@ -184,6 +195,121 @@ def probe_all(hosts=HOSTS, timeout: float = 6.0) -> list[Probe]:
         return []
     with ThreadPoolExecutor(max_workers=len(hosts)) as pool:
         return list(pool.map(lambda host: probe_host(host, timeout), hosts))
+
+
+# What pixi is asked to fetch. `search` is the one pixi command that downloads
+# without needing a workspace or touching one, and a single package from a
+# single channel costs the index for that channel and nothing else: about a
+# megabyte, once. The package only has to exist; what it says is never read.
+PIXI_SEARCH = ("search", "--limit", "1", "--channel", "conda-forge",
+               "--platform", "noarch", "tqdm")
+
+# How that attempt turned out.
+DOWNLOADED = "downloaded"     # pixi's own downloads work, and that settles it
+REFUSED = "refused"           # a certificate pixi would not accept
+STOPPED = "stopped"           # the connection did not happen at all
+SLOW = "slow"                 # it was still trying when we stopped waiting
+PUZZLING = "puzzling"         # it failed for a reason this does not recognise
+NOT_TRIED = "not-tried"       # pixi is not here, or the internet was not asked
+
+# The words pixi uses when a certificate is the problem. rattler, underneath
+# pixi, says "invalid peer certificate: UnknownIssuer" almost verbatim when an
+# antivirus has signed the connection, and this is that sentence.
+REFUSED_WORDS = ("certificate", "unknownissuer", "self-signed", "self signed",
+                 "handshake", "tls", "webpki")
+
+# And when the connection never happened. Both lists are read after the fact,
+# so a message that matches neither is reported rather than guessed at.
+STOPPED_WORDS = ("connect error", "connection refused", "connection reset",
+                 "connection closed", "dns error", "failed to lookup",
+                 "no such host", "timed out", "timeout", "os error",
+                 "error sending request", "proxy", "network is unreachable")
+
+
+@dataclass
+class Download:
+    """pixi's own attempt at one download, and what it said about it."""
+
+    outcome: str
+    lines: list[str] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return self.outcome == DOWNLOADED
+
+    @property
+    def failed(self) -> bool:
+        """Whether pixi could not download, as opposed to could not be asked."""
+        return self.outcome in (REFUSED, STOPPED, SLOW)
+
+
+def readable(output: str, keep: int = 4) -> list[str]:
+    """pixi's error without the box it is drawn in, innermost cause last.
+
+    pixi draws its errors as a tree of box-drawing characters and wraps long
+    urls across lines, neither of which survives being quoted in a report or
+    read out over a phone. The cause is at the bottom, so it is the bottom that
+    is kept.
+    """
+    lines: list[str] = []
+    for raw in output.splitlines():
+        line = raw.strip()
+        if line.startswith("Error:"):          # the first line carries both
+            line = line[len("Error:"):]
+        line = line.lstrip("×│├└╰┌─▶ ").strip()
+        if not line or line.startswith("Using channels"):
+            continue
+        # A url that pixi wrapped: put it back together rather than reporting
+        # half of one on a line of its own.
+        if lines and lines[-1].count("(") > lines[-1].count(")"):
+            lines[-1] += line
+            continue
+        lines.append(line)
+    return lines[-keep:]
+
+
+def pixi_download(executable=None, timeout: float = 45.0) -> Download:
+    """Make pixi itself fetch one small file, and report how that went.
+
+    This is the only check that asks the question in the student's own terms.
+    Everything else here is Python reaching a host, which on Windows means
+    trusting whatever the operating system trusts — including the certificate
+    an antivirus signs with. pixi trusts only the list compiled into it, so
+    Python getting through is not evidence that pixi will.
+
+    It downloads into a cache of its own, thrown away afterwards, for two
+    reasons: pixi has to go to the network rather than answer out of a file it
+    already had, and `im doctor` has to leave nothing behind.
+    """
+    executable = executable or shutil.which("pixi")
+    if executable is None:
+        return Download(NOT_TRIED)
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="im-doctor-") as cache:
+            finished = subprocess.run(
+                [str(executable), *PIXI_SEARCH],
+                capture_output=True, text=True, timeout=timeout,
+                env=dict(os.environ, PIXI_CACHE_DIR=cache, RATTLER_CACHE_DIR=cache,
+                         PIXI_NO_PROGRESS="true", PIXI_COLOR="never"),
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+    except subprocess.TimeoutExpired:
+        return Download(SLOW, [f"it was still trying after {timeout:.0f} seconds"])
+    except (OSError, subprocess.SubprocessError) as error:
+        return Download(NOT_TRIED, [str(error)])
+
+    if finished.returncode == 0:
+        return Download(DOWNLOADED)
+
+    said = f"{finished.stderr or ''}\n{finished.stdout or ''}"
+    lines = readable(said)
+    lowered = said.lower()
+    if any(word in lowered for word in REFUSED_WORDS):
+        return Download(REFUSED, lines)
+    if any(word in lowered for word in STOPPED_WORDS):
+        return Download(STOPPED, lines)
+    return Download(PUZZLING, lines)
 
 
 def clock_offset(host: str, timeout: float = 6.0) -> float | None:

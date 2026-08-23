@@ -1,10 +1,13 @@
 """Running every check, and laying the answers out for someone who is stuck.
 
-The scan prints as it happens, a line per thing looked at, so the command
-visibly does something while it waits on the network. What to do about any of
-it comes afterwards, in full, numbered, and only for what was actually wrong.
-The scan is for reading quickly and the list underneath is for acting on, and
-running them together makes both harder to use.
+The scan prints as it happens, so the command visibly does something while it
+waits on the network, and it prints only what is wrong: a student running this
+is stuck, and forty ticks scrolling past is forty lines of hiding the one that
+matters. --verbose shows everything that was looked at, and the file written by
+--report holds it whether or not anyone asked. What to do about any of it comes
+afterwards, in full, numbered, and only for what was actually wrong. The scan is
+for reading quickly and the list underneath is for acting on, and running them
+together makes both harder to use.
 
 Only failures set the exit code. A course folder inside OneDrive is worth a
 paragraph and is not worth telling a student their setup is broken over.
@@ -147,8 +150,13 @@ def render_report(findings: list[Finding], context: Context, version: str = "") 
 
 def diagnose(echo, *, offline: bool = False, report: bool = False,
              cwd: Path | None = None, checks=CHECKS, version: str = "",
-             stream=None) -> int:
-    """Look at everything, say what was found, and say what to do about it."""
+             stream=None, verbose: bool = False) -> int:
+    """Look at everything, say what was found, and say what to do about it.
+
+    Everything looked at is kept, and only what is wrong is printed unless
+    `verbose`. The count of the rest is printed too, so that a scan which found
+    nothing to say still visibly happened.
+    """
     context = Context(system=platform.system(),
                       cwd=Path(cwd) if cwd else Path.cwd(),
                       offline=offline)
@@ -159,7 +167,12 @@ def diagnose(echo, *, offline: bool = False, report: bool = False,
 
     findings: list[Finding] = []
     group = None
+    fine = 0
     for finding in findings_for(context, checks):
+        findings.append(finding)
+        if finding.status == OK and not verbose:
+            fine += 1
+            continue
         if finding.group != group:
             if group is not None:
                 echo("")
@@ -168,7 +181,13 @@ def diagnose(echo, *, offline: bool = False, report: bool = False,
         echo(f"  {mark[finding.status]} {finding.title}")
         for detail in finding.detail:
             echo(f"      {detail}")
-        findings.append(finding)
+
+    if fine:
+        if group is not None:
+            echo("")
+        echo(f"{fine} {'other ' if group is not None else ''}"
+             f"{'things were' if fine > 1 else 'thing was'} looked at and found fine.")
+        echo("Run `im doctor --verbose` to see them.")
 
     echo("")
     if trouble_first(findings):

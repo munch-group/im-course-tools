@@ -46,7 +46,8 @@ command that runs anywhere rather than only in the course folder — because
 being in the wrong folder is one of the things it is there to notice.
 
 It reads the machine and changes nothing on it, so it is always safe to tell a
-hundred people to run it. It looks at, in this order:
+hundred people to run it. The one thing it downloads goes into a temporary
+cache that is thrown away again. It looks at, in this order:
 
 - **This machine** — which OS and Python, and on a Mac whether the terminal is
   the Intel one being emulated, which quietly gets the wrong build of everything.
@@ -65,23 +66,35 @@ hundred people to run it. It looks at, in this order:
   `im` being run is the one inside it.
 - **Security software** — on Windows by asking Windows' own Security Center,
   on macOS by looking where the dozen products a university laptop carries
-  install themselves.
+  install themselves. Installed is not the same as at fault: nearly every
+  laptop in the room carries something and nearly none of it is why an install
+  failed, so what is there stays a line in the scan until the internet checks
+  turn up evidence — a certificate pixi refuses, a download of pixi's own that
+  never arrives — and only then does it become something to go and do.
 - **Internet access** — a TLS connection to every host pixi downloads from, and
   then the part that matters: who signed each certificate. Antivirus that
   inspects encrypted traffic substitutes its own, which pixi refuses and a
   browser accepts, and that gap is the single most common reason an install
-  fails on a laptop that browses the web perfectly well. Also proxy and
-  certificate variables set in the terminal, and a clock wrong enough to make
-  valid certificates look expired.
+  fails on a laptop that browses the web perfectly well. Then the same question
+  in pixi's own words: pixi is made to fetch one small file itself. Those
+  connections above are opened by Python, which trusts a different list on every
+  operating system — a conda environment that has been moved loses its list
+  entirely and then makes every host on the internet look tampered with — and
+  pixi getting through is what tells that apart from a machine where something
+  really is in the way. Also proxy and certificate variables set in the
+  terminal, and a clock wrong enough to make valid certificates look expired.
 - **VS Code** — installed, with the Python and Jupyter extensions.
 
 Every problem is printed twice: once as a line in the scan, and once at the
 bottom with the command or click-path that fixes it, written out in full,
 because a student reading it is by definition having trouble reaching the
-website.
+website. What was looked at and found fine is counted rather than listed, so
+that the thing which is wrong is not hidden among forty ticks; `--verbose`
+lists it, and the file written by `--report` holds it either way.
 
 ```bash
 im doctor                # the whole thing
+im doctor -v             # also show what was looked at and was fine
 im doctor --offline      # skip the network checks
 im doctor --report       # also write im-doctor-report.txt to send to an instructor
 im doctor --no-upgrade   # do not offer to upgrade `im` itself first

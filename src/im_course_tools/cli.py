@@ -78,7 +78,9 @@ def check() -> None:
               help="Skip the checks that need the internet.")
 @click.option("--upgrade/--no-upgrade", default=None,
               help="Upgrade `im` first, or leave it, without being asked.")
-def doctor(report: bool, offline: bool, upgrade: bool | None) -> None:
+@click.option("-v", "--verbose", is_flag=True,
+              help="Also show the things that were looked at and were fine.")
+def doctor(report: bool, offline: bool, upgrade: bool | None, verbose: bool) -> None:
     """Work out why the course setup is not working.
 
     Unlike the other commands this one runs anywhere, because not being in the
@@ -95,7 +97,7 @@ def doctor(report: bool, offline: bool, upgrade: bool | None) -> None:
         if stop is not None:
             raise SystemExit(stop)
     raise SystemExit(diagnose(click.echo, offline=offline, report=report,
-                              version=__version__))
+                              version=__version__, verbose=verbose))
 
 
 @main.command()
