@@ -6,6 +6,7 @@ the same environment variables a person would use to try the tool against a
 local preview, so nothing here touches the real site.
 """
 
+import io
 import json
 import zipfile
 from pathlib import Path
@@ -26,9 +27,33 @@ def notebook_bytes(title: str) -> str:
     })
 
 
+# The course folder as the website publishes it: the six files `im update`
+# keeps current, and two more that it must never touch.
+TEMPLATE = {
+    "pixi.toml": "[workspace]\nname = 'instructing-machines'\n",
+    "pixi.lock": "version: 6\n",
+    ".pin_pixi_path.py": "# tell VS Code where pixi is\n",
+    ".gitignore": ".pixi/\n__pycache__/\n",
+    ".vscode/settings.json": '{\n    // the course settings\n}\n',
+    ".vscode/extensions.json": '{\n    "recommendations": []\n}\n',
+    "week1/notebooks.ipynb": notebook_bytes("week one"),
+    "data/data_table.csv": "a,b\n1,2\n",
+}
+ROOT = "instructing-machines"
+
+
+def zip_bytes(entries: dict[str, str], root: str = ROOT) -> bytes:
+    """One published course folder, laid out the way the book's build lays it out."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for name, text in entries.items():
+            archive.writestr(f"{root}/{name}", text)
+    return buffer.getvalue()
+
+
 @pytest.fixture
 def site(tmp_path: Path) -> Path:
-    """A published course website: notebooks, project zips and both manifests."""
+    """A published course website: notebooks, project zips and the course folder."""
     site = tmp_path / "site"
     (site / "notebooks").mkdir(parents=True)
     for name in CHAPTERS:
@@ -42,8 +67,10 @@ def site(tmp_path: Path) -> Path:
             zf.writestr(f"{name}/test_{name}.py", "# the tests\n")
     (site / "project-files" / "index.txt").write_text("\n".join(PROJECTS) + "\n")
 
-    (site / "pixi.toml").write_text("[workspace]\nname = 'instructing-machines'\n")
-    (site / "pixi.lock").write_text("version: 6\n")
+    # Published loose as well as inside the zip, exactly as the site does it.
+    (site / "pixi.toml").write_text(TEMPLATE["pixi.toml"])
+    (site / "pixi.lock").write_text(TEMPLATE["pixi.lock"])
+    (site / f"{ROOT}.zip").write_bytes(zip_bytes(TEMPLATE))
     return site
 
 
@@ -180,21 +207,117 @@ def test_check_names_what_is_missing(run):
     assert "steps-widget" in result.output
 
 
-def test_update_refreshes_both_files_and_keeps_backups(run, course, monkeypatch):
-    monkeypatch.setenv("PATH", "/nonexistent")     # stop before `pixi install`
-    (course / "pixi.toml").write_text("[workspace]\nname = 'old'\n")
+@pytest.fixture
+def stopping_at_install(monkeypatch):
+    """`im update` up to the point where it would hand over to pixi."""
+    monkeypatch.setenv("PATH", "/nonexistent")
+    return monkeypatch
+
+
+def test_update_replaces_an_old_file_and_keeps_what_was_there(run, course,
+                                                              stopping_at_install):
+    (course / "pixi.toml").write_text("[workspace]\nname = 'last year'\n")
     result = run("update")
-    assert (course / "pixi.toml.backup").read_text() == "[workspace]\nname = 'old'\n"
-    assert "instructing-machines" in (course / "pixi.toml").read_text()
-    assert (course / "pixi.lock.backup").exists()
-    assert "Could not find pixi" in result.output
+    assert (course / "pixi.toml.backup").read_text() == "[workspace]\nname = 'last year'\n"
+    assert (course / "pixi.toml").read_text() == TEMPLATE["pixi.toml"]
+    assert "Updated pixi.toml, keeping your old one as pixi.toml.backup" in result.output
+    assert "Could not find pixi" in result.output      # it went on to install
     assert result.exit_code == 1
 
 
-def test_update_refuses_a_page_that_is_not_a_manifest(run, course, site):
-    site.joinpath("pixi.toml").write_text("<!DOCTYPE html><title>404</title>")
+def test_update_brings_the_configs_and_the_script_too(run, course, stopping_at_install):
+    """The whole point: a fix to any of these used to reach nobody."""
+    run("update")
+    for name in (".gitignore", ".pin_pixi_path.py",
+                 ".vscode/settings.json", ".vscode/extensions.json"):
+        assert course.joinpath(*name.split("/")).read_text() == TEMPLATE[name]
+
+
+def test_update_leaves_a_file_that_is_already_current_completely_alone(
+        run, course, stopping_at_install):
+    (course / ".gitignore").write_text(TEMPLATE[".gitignore"])
+    result = run("update")
+    assert not (course / ".gitignore.backup").exists()
+    assert ".gitignore" not in result.output.split("Installing")[0]
+
+
+def test_update_says_so_when_there_was_nothing_to_do(run, course, stopping_at_install):
+    for name, text in TEMPLATE.items():
+        if name in ("week1/notebooks.ipynb", "data/data_table.csv"):
+            continue
+        target = course.joinpath(*name.split("/"))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+    result = run("update")
+    assert "All 6 of your course folder's files were already up to date." in result.output
+    assert not list(course.rglob("*.backup"))
+
+
+def test_update_counts_the_ones_it_did_not_have_to_touch(run, course, stopping_at_install):
+    (course / "pixi.toml").write_text("[workspace]\nname = 'last year'\n")
+    assert "The other 1 file was already up to date." in run("update").output
+
+
+def test_update_does_not_touch_a_notebook_or_the_data(run, course, stopping_at_install):
+    """Both are in the same download, and both are places a student works."""
+    (course / "week1").mkdir()
+    (course / "week1" / "notebooks.ipynb").write_text("my own work")
+    (course / "data").mkdir()
+    (course / "data" / "data_table.csv").write_text("mine\n")
+    run("update")
+    assert (course / "week1" / "notebooks.ipynb").read_text() == "my own work"
+    assert (course / "data" / "data_table.csv").read_text() == "mine\n"
+
+
+def test_update_ignores_line_endings_a_windows_editor_rewrote(run, course,
+                                                              stopping_at_install):
+    (course / ".gitignore").write_bytes(
+        TEMPLATE[".gitignore"].replace("\n", "\r\n").encode())
+    run("update")
+    assert not (course / ".gitignore.backup").exists()
+
+
+def test_update_still_works_when_the_course_folder_drops_a_file(run, course, site,
+                                                                stopping_at_install):
+    thinner = {k: v for k, v in TEMPLATE.items() if k != ".gitignore"}
+    site.joinpath(f"{ROOT}.zip").write_bytes(zip_bytes(thinner))
+    result = run("update")
+    assert not (course / ".gitignore").exists()
+    assert (course / ".pin_pixi_path.py").exists()
+    assert result.exit_code == 1                      # only because pixi is missing
+
+
+def test_update_refuses_a_page_that_is_not_the_course_folder(run, course, site):
+    site.joinpath(f"{ROOT}.zip").write_bytes(b"<!DOCTYPE html><title>404</title>")
     before = (course / "pixi.toml").read_text()
     result = run("update")
     assert result.exit_code == 1
     assert (course / "pixi.toml").read_text() == before
-    assert not (course / "pixi.toml.backup").exists()
+    assert not list(course.rglob("*.backup"))
+
+
+def test_update_refuses_a_download_with_no_environment_in_it(run, course, site):
+    site.joinpath(f"{ROOT}.zip").write_bytes(
+        zip_bytes({k: v for k, v in TEMPLATE.items() if k != "pixi.lock"}))
+    result = run("update")
+    assert result.exit_code == 1
+    assert "no pixi.lock" in result.output
+    assert not (course / ".pin_pixi_path.py").exists()   # nothing written at all
+
+
+def test_update_refuses_a_manifest_that_is_not_a_manifest(run, course, site):
+    site.joinpath(f"{ROOT}.zip").write_bytes(
+        zip_bytes({**TEMPLATE, "pixi.toml": "<!DOCTYPE html><title>404</title>"}))
+    before = (course / "pixi.toml").read_text()
+    result = run("update")
+    assert result.exit_code == 1
+    assert (course / "pixi.toml").read_text() == before
+    assert not (course / ".pin_pixi_path.py").exists()
+
+
+def test_update_takes_the_folder_whatever_it_unpacks_into(run, course, site,
+                                                          stopping_at_install):
+    """The name of the folder in the zip is the website's business, not ours."""
+    site.joinpath(f"{ROOT}.zip").write_bytes(zip_bytes(TEMPLATE, root="im-2027"))
+    run("update")
+    assert (course / ".pin_pixi_path.py").exists()

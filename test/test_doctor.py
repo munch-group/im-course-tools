@@ -373,6 +373,406 @@ def test_a_globally_installed_im_says_so(here, course):
     assert "pixi run im check" in written([finding])
 
 
+# --- the terminal the student is typing into -------------------------------- #
+
+def shell_is(here, monkeypatch, name, login=None):
+    """A terminal whose own process says it is running `name`."""
+    monkeypatch.setattr(checks, "parent_name", lambda system: name)
+    if login is None:
+        monkeypatch.delenv("SHELL", raising=False)
+    else:
+        monkeypatch.setenv("SHELL", login)
+    here.shell = None
+    return here
+
+
+def test_the_shell_in_use_is_asked_of_the_process_not_of_the_environment(here, monkeypatch):
+    shell_is(here, monkeypatch, "bash", login="/bin/zsh")
+    assert checks.shell_of(here) == "bash"
+
+
+def test_a_login_shell_is_not_a_different_shell(here, monkeypatch):
+    monkeypatch.setattr(checks, "run_briefly", lambda *a, **k: "-zsh\n")
+    monkeypatch.setattr(checks.os, "getppid", lambda: 1)
+    assert checks.parent_name("Darwin") == "zsh"
+
+
+def test_a_shell_named_by_its_whole_path_is_still_named(monkeypatch):
+    monkeypatch.setattr(checks, "run_briefly", lambda *a, **k: "/bin/zsh\n")
+    assert checks.parent_name("Darwin") == "zsh"
+
+
+def test_what_started_im_is_ignored_when_it_is_not_a_shell(here, monkeypatch):
+    """`pixi run im doctor` makes pixi the parent, and pixi reads no startup file."""
+    shell_is(here, monkeypatch, "pixi", login="/bin/zsh")
+    assert checks.shell_of(here) == "zsh"
+
+
+def test_the_shell_is_asked_once_however_many_checks_want_it(here, monkeypatch):
+    asked = []
+    monkeypatch.setattr(checks, "parent_name", lambda system: asked.append(1) or "zsh")
+    here.shell = None
+    checks.shell_of(here)
+    checks.shell_of(here)
+    assert len(asked) == 1
+
+
+def test_the_shell_this_terminal_runs_is_reported(here, monkeypatch):
+    shell_is(here, monkeypatch, "zsh", login="/bin/zsh")
+    finding = checks.shell_finding(here)
+    assert finding.status == OK
+    assert finding.title == "zsh"
+    assert finding.detail == []
+
+
+def test_a_shell_that_is_not_the_login_one_is_worth_a_line(here, monkeypatch):
+    shell_is(here, monkeypatch, "bash", login="/bin/zsh")
+    assert "SHELL=/bin/zsh" in written([checks.shell_finding(here)])
+
+
+def test_each_shell_is_looked_for_in_the_files_it_actually_reads(tmp_path):
+    assert checks.startup_files("zsh", "Darwin", tmp_path)[0] == tmp_path / ".zshrc"
+    assert checks.startup_files("bash", "Darwin", tmp_path)[0] == tmp_path / ".bash_profile"
+    assert checks.startup_files("bash", "Linux", tmp_path)[0] == tmp_path / ".bashrc"
+    assert checks.startup_files("fish", "Darwin", tmp_path)[0] == \
+        tmp_path / ".config" / "fish" / "config.fish"
+    assert checks.startup_files("tcsh", "Darwin", tmp_path) == []
+
+
+def test_the_line_that_puts_pixi_on_path_is_found_wherever_it_is(tmp_path):
+    (tmp_path / ".zshrc").write_text("# nothing here\n")
+    (tmp_path / ".zprofile").write_text('export PATH="$HOME/.pixi/bin:$PATH"\n')
+    files = checks.startup_files("zsh", "Darwin", tmp_path)
+    assert checks.pixi_on_startup(files) == tmp_path / ".zprofile"
+
+
+def test_no_startup_file_mentioning_pixi_is_told_from_one_that_does(tmp_path):
+    (tmp_path / ".zshrc").write_text("alias ll='ls -l'\n")
+    assert checks.pixi_on_startup(checks.startup_files("zsh", "Darwin", tmp_path)) is None
+
+
+def test_fish_is_given_the_line_fish_understands():
+    assert "fish_add_path" in checks.path_line("fish")
+    assert checks.path_line("zsh").startswith("export PATH=")
+
+
+def pixi_installed_but_unseen(here, monkeypatch, tmp_path, shell="zsh"):
+    """pixi on disk where the installer puts it, and not on this terminal's PATH."""
+    monkeypatch.setattr(checks.shutil, "which", lambda _: None)
+    monkeypatch.setattr(checks.security, "pixi_locations",
+                        lambda *a: [tmp_path / ".pixi" / "bin" / "pixi"])
+    monkeypatch.setattr(checks.Path, "home", classmethod(lambda cls: tmp_path))
+    shell_is(here, monkeypatch, shell, login=f"/bin/{shell}")
+    here.system = "Darwin"
+    return here
+
+
+def test_a_shell_whose_startup_file_never_heard_of_pixi_is_told_which_file(
+        here, monkeypatch, tmp_path):
+    pixi_installed_but_unseen(here, monkeypatch, tmp_path, shell="bash")
+    (tmp_path / ".zshrc").write_text('export PATH="$HOME/.pixi/bin:$PATH"\n')
+    finding = checks.pixi_check(here)
+    assert finding.status == FAIL
+    said = written([finding])
+    assert "Opening a new terminal will not help" in said
+    assert "echo 'export PATH=\"$HOME/.pixi/bin:$PATH\"' >> ~/.bash_profile" in said
+
+
+def test_a_startup_file_that_does_have_it_is_told_to_open_a_new_terminal(
+        here, monkeypatch, tmp_path):
+    pixi_installed_but_unseen(here, monkeypatch, tmp_path)
+    (tmp_path / ".zshrc").write_text('export PATH="$HOME/.pixi/bin:$PATH"\n')
+    finding = checks.pixi_check(here)
+    assert finding.status == FAIL
+    assert "Close this terminal completely" in written([finding])
+
+
+def test_windows_is_not_sent_to_edit_a_startup_file(here, monkeypatch, tmp_path):
+    pixi_installed_but_unseen(here, monkeypatch, tmp_path)
+    here.system = "Windows"
+    assert "Close this terminal completely" in written([checks.pixi_check(here)])
+
+
+def on_path_from(here, monkeypatch, tmp_path, where):
+    here.system, here.pixi = "Darwin", str(where)
+    monkeypatch.setattr(checks.Path, "home", classmethod(lambda cls: tmp_path))
+    return shell_is(here, monkeypatch, "zsh", login="/bin/zsh")
+
+
+def test_pixi_on_path_that_no_startup_file_puts_there_is_a_warning(
+        here, monkeypatch, tmp_path):
+    on_path_from(here, monkeypatch, tmp_path, tmp_path / ".pixi" / "bin" / "pixi")
+    (tmp_path / ".zshrc").write_text("# an empty one\n")
+    finding = checks.pixi_path_finding(here)
+    assert finding.status == WARN
+    assert "echo 'export PATH=" in written([finding])
+    assert "~/.zshrc" in written([finding])
+
+
+def test_pixi_on_path_because_a_startup_file_puts_it_there_is_fine(
+        here, monkeypatch, tmp_path):
+    on_path_from(here, monkeypatch, tmp_path, tmp_path / ".pixi" / "bin" / "pixi")
+    (tmp_path / ".zshrc").write_text('export PATH="$HOME/.pixi/bin:$PATH"\n')
+    finding = checks.pixi_path_finding(here)
+    assert finding.status == OK
+    assert "~/.zshrc" in finding.title
+
+
+def test_a_pixi_installed_somewhere_else_gets_no_opinion(here, monkeypatch, tmp_path):
+    on_path_from(here, monkeypatch, tmp_path, Path("/opt/homebrew/bin/pixi"))
+    (tmp_path / ".zshrc").write_text("# an empty one\n")
+    assert checks.pixi_path_finding(here).status == OK
+
+
+def test_the_startup_file_is_not_windows_business(here, monkeypatch, tmp_path):
+    on_path_from(here, monkeypatch, tmp_path, tmp_path / ".pixi" / "bin" / "pixi")
+    here.system = "Windows"
+    assert checks.pixi_path_finding(here) is None
+
+
+# --- what powershell is allowed to run -------------------------------------- #
+
+LISTED = ("MachinePolicy=Undefined\nUserPolicy=Undefined\nProcess=Undefined\n"
+          "CurrentUser={}\nLocalMachine=Undefined\n")
+
+
+def policy(monkeypatch, said):
+    monkeypatch.setattr(checks.security, "powershell", lambda *a, **k: said)
+
+
+def test_powershell_refusing_to_run_scripts_is_a_warning_with_the_one_command(
+        here, monkeypatch):
+    here.system = "Windows"
+    policy(monkeypatch, "Restricted\n" + LISTED.format("Undefined"))
+    finding = checks.scripts_finding(here)
+    assert finding.status == WARN
+    said = written([finding])
+    assert "disabled on this system" in said       # the words the student saw
+    assert "Set-ExecutionPolicy RemoteSigned -Scope CurrentUser" in said
+
+
+def test_a_policy_the_student_may_change_is_told_from_one_they_may_not(here, monkeypatch):
+    here.system = "Windows"
+    policy(monkeypatch, "AllSigned\nMachinePolicy=AllSigned\nUserPolicy=Undefined\n"
+                        "Process=Undefined\nCurrentUser=Undefined\nLocalMachine=Undefined\n")
+    finding = checks.scripts_finding(here)
+    assert finding.status == WARN
+    said = written([finding])
+    assert "Set-ExecutionPolicy RemoteSigned" not in said
+    assert "-ExecutionPolicy Bypass" in said
+    assert "IT support" in said
+
+
+def test_a_policy_that_allows_scripts_is_fine(here, monkeypatch):
+    here.system = "Windows"
+    policy(monkeypatch, "RemoteSigned\n" + LISTED.format("RemoteSigned"))
+    finding = checks.scripts_finding(here)
+    assert finding.status == OK
+    assert "set for CurrentUser" in written([finding])
+
+
+def test_windows_refusing_to_say_is_not_read_as_a_refusal_to_run(here, monkeypatch):
+    here.system = "Windows"
+    policy(monkeypatch, None)
+    assert checks.scripts_finding(here) is None
+
+
+def test_a_mac_is_not_asked_about_powershell(here, monkeypatch):
+    here.system = "Darwin"
+    policy(monkeypatch, "Restricted\n" + LISTED.format("Undefined"))
+    assert checks.scripts_finding(here) is None
+
+
+# --- a zip unpacked one level too deep -------------------------------------- #
+
+def unpacked_twice(tmp_path: Path) -> Path:
+    """What "Extract all" leaves behind when its default destination is taken."""
+    outer = tmp_path / "instructing-machines"
+    inner = outer / "instructing-machines"
+    inner.mkdir(parents=True)
+    (inner / "pixi.toml").write_text("[workspace]\n")
+    return outer
+
+
+def test_the_folder_inside_this_one_is_found(tmp_path):
+    outer = unpacked_twice(tmp_path)
+    assert checks.folder_inside(outer) == outer / "instructing-machines"
+
+
+def test_a_folder_with_no_course_folder_under_it_is_not_invented(tmp_path):
+    (tmp_path / "holiday photos").mkdir()
+    assert checks.folder_inside(tmp_path) is None
+
+
+def test_standing_one_folder_above_the_course_folder_says_which_one_to_go_to(
+        tmp_path, monkeypatch):
+    outer = unpacked_twice(tmp_path)
+    monkeypatch.delenv("IM_COURSE_FOLDER", raising=False)
+    here = Context(system="Windows", cwd=outer)
+    finding = checks.folder_check(here)
+    assert finding.status == FAIL
+    said = written([finding])
+    assert "the one inside this one" in finding.title
+    assert f'cd "{outer / "instructing-machines"}"' in said
+    assert "Extract all" in said
+    assert "downloading again" in said
+
+
+def test_a_mac_is_not_told_about_a_button_it_does_not_have(tmp_path, monkeypatch):
+    outer = unpacked_twice(tmp_path)
+    monkeypatch.delenv("IM_COURSE_FOLDER", raising=False)
+    said = written([checks.folder_check(Context(system="Darwin", cwd=outer))])
+    assert "Extract all" not in said
+    assert "Finder" in said
+
+
+def test_a_folder_below_that_is_not_a_doubled_one_is_only_pointed_at(tmp_path, monkeypatch):
+    (tmp_path / "Downloads" / "the-course").mkdir(parents=True)
+    (tmp_path / "Downloads" / "the-course" / "pixi.toml").write_text("[workspace]\n")
+    monkeypatch.delenv("IM_COURSE_FOLDER", raising=False)
+    said = written([checks.folder_check(Context(system="Windows", cwd=tmp_path / "Downloads"))])
+    assert "unpacked into a new folder" not in said
+    assert f'cd "{tmp_path / "Downloads" / "the-course"}"' in said
+
+
+def test_the_wider_search_is_still_what_answers_when_nothing_is_below(tmp_path, monkeypatch):
+    monkeypatch.delenv("IM_COURSE_FOLDER", raising=False)
+    monkeypatch.setattr(checks, "search_briefly", lambda *a, **k: [])
+    finding = checks.folder_check(Context(system="Darwin", cwd=tmp_path))
+    assert finding.title == "You are not in your course folder"
+
+
+# --- an environment built somewhere else, without pixi having said so ------- #
+
+def kernel(course: Path, python: Path) -> None:
+    """The kernel spec a notebook starts, naming the Python it was built with."""
+    spec = course.joinpath(*checks.ENV_PATH, *checks.KERNEL_SPEC)
+    spec.parent.mkdir(parents=True, exist_ok=True)
+    spec.write_text(json.dumps({"argv": [str(python), "-m", "ipykernel_launcher",
+                                         "-f", "{connection_file}"]}))
+
+
+def test_the_kernel_still_names_the_folder_the_environment_was_built_in(here, course, tmp_path):
+    here.env_python = build(course, manifest=None)
+    kernel(course, tmp_path / "old-name" / ".pixi" / "envs" / "default" / "bin" / "python")
+    here.folder = course
+    finding = checks.moved_check(here)
+    assert finding.status == FAIL
+    assert str(tmp_path / "old-name") in written([finding])
+    assert "pixi clean" in written([finding])
+
+
+def test_a_kernel_naming_this_very_folder_is_not_a_move(here, course):
+    here.env_python = build(course, manifest=None)
+    kernel(course, course.joinpath(*checks.ENV_PATH, "bin", "python"))
+    here.folder = course
+    assert checks.moved_check(here).status == OK
+
+
+def test_a_script_written_by_pixi_says_it_too(here, course, tmp_path):
+    here.env_python = build(course, manifest=None)
+    pip = course.joinpath(*checks.ENV_PATH, "bin", "pip")
+    old = tmp_path / "old-name" / ".pixi" / "envs" / "default" / "bin" / "python"
+    pip.write_text(f"#!{old}\nimport sys\n")
+    here.folder = course
+    assert str(tmp_path / "old-name") in written([checks.moved_check(here)])
+
+
+def test_pixis_own_stamp_is_believed_over_the_rest(here, course, tmp_path):
+    """It is rewritten on every install; the others can be left over from one."""
+    here.env_python = build(course, manifest=course / "pixi.toml")
+    kernel(course, tmp_path / "old-name" / ".pixi" / "envs" / "default" / "bin" / "python")
+    here.folder = course
+    assert checks.moved_check(here).status == OK
+
+
+def test_a_python_that_is_not_in_a_pixi_folder_at_all_says_nothing(here, course):
+    here.env_python = build(course, manifest=None)
+    kernel(course, Path("/usr/local/bin/python3"))
+    here.folder = course
+    assert checks.moved_check(here) is None
+
+
+# --- whether the environment is being used ---------------------------------- #
+
+def nothing_active(monkeypatch):
+    for name in ("PIXI_PROJECT_ROOT", "PIXI_ENVIRONMENT_NAME", "CONDA_PREFIX",
+                 "CONDA_DEFAULT_ENV", "VIRTUAL_ENV"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def ready(here, course):
+    """A course folder whose environment is built, which is when this is asked."""
+    here.folder, here.env_python = course, build(course, manifest=course / "pixi.toml")
+    return here
+
+
+def test_the_course_environment_being_active_is_the_answer_wanted(here, course, monkeypatch):
+    nothing_active(monkeypatch)
+    monkeypatch.setenv("CONDA_PREFIX", str(course.joinpath(*checks.ENV_PATH)))
+    monkeypatch.setenv("PIXI_PROJECT_ROOT", str(course))
+    finding = checks.activation_check(ready(here, course))
+    assert finding.status == OK
+    assert "active in this terminal" in finding.title
+
+
+def test_nothing_activated_is_said_plainly_with_how_to_activate(here, course, monkeypatch):
+    nothing_active(monkeypatch)
+    finding = checks.activation_check(ready(here, course))
+    assert finding.status == WARN
+    said = written([finding])
+    assert "pixi shell" in said
+    assert "pixi run im check" in said
+
+
+def test_a_conda_environment_in_the_way_names_itself(here, course, monkeypatch):
+    nothing_active(monkeypatch)
+    monkeypatch.setenv("CONDA_PREFIX", "/opt/anaconda3")
+    monkeypatch.setenv("CONDA_DEFAULT_ENV", "base")
+    finding = checks.activation_check(ready(here, course))
+    assert finding.status == WARN
+    said = written([finding])
+    assert "base is active" in finding.title
+    assert "conda deactivate" in said
+    assert "auto_activate_base false" in said
+
+
+def test_a_virtual_environment_is_left_the_way_virtual_environments_are(
+        here, course, monkeypatch):
+    nothing_active(monkeypatch)
+    monkeypatch.setenv("VIRTUAL_ENV", "/Users/student/venv")
+    finding = checks.activation_check(ready(here, course))
+    assert finding.status == WARN
+    assert "deactivate" in written([finding])
+
+
+def test_another_projects_pixi_environment_is_told_apart(here, course, monkeypatch, tmp_path):
+    nothing_active(monkeypatch)
+    monkeypatch.setenv("PIXI_PROJECT_ROOT", str(tmp_path / "some-other-project"))
+    monkeypatch.setenv("CONDA_PREFIX", str(tmp_path / "some-other-project" / ".pixi"))
+    finding = checks.activation_check(ready(here, course))
+    assert finding.status == WARN
+    said = written([finding])
+    assert "another folder" in finding.title
+    assert f'cd "{course}"' in said
+
+
+def test_a_second_environment_of_this_folder_is_named_as_that(here, course, monkeypatch):
+    nothing_active(monkeypatch)
+    monkeypatch.setenv("PIXI_PROJECT_ROOT", str(course))
+    monkeypatch.setenv("PIXI_ENVIRONMENT_NAME", "docs")
+    monkeypatch.setenv("CONDA_PREFIX", str(course / ".pixi" / "envs" / "docs"))
+    finding = checks.activation_check(ready(here, course))
+    assert finding.status == WARN
+    assert "docs" in finding.title
+
+
+def test_an_environment_that_is_not_built_is_not_told_to_be_activated(here, course, monkeypatch):
+    nothing_active(monkeypatch)
+    here.folder = course
+    assert checks.activation_check(here) is None
+
+
 # --- security software ------------------------------------------------------ #
 
 def installed(here, monkeypatch, products, survey=None):

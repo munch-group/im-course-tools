@@ -474,7 +474,7 @@ def upgrade(install: Install, echo) -> int:
         if install.kind == CONDA_PROJECT:
             echo("")
             echo("`im update` may get there instead: it takes the course's own")
-            echo("pixi.toml and pixi.lock, which name the version everyone else is on.")
+            echo("pixi.toml, which names the version everyone else is on.")
         return finished.returncode
 
     # It can finish perfectly happily and change nothing at all: the new version

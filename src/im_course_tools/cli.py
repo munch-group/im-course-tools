@@ -5,7 +5,7 @@
     im get iteration         a chapter notebook
     im get alignmentproject  a whole project
     im get                   everything on offer
-    im update                refresh the environment from the website
+    im update                refresh the course folder from the website
 
 Every command that writes something writes it into the course folder, found by
 walking up from wherever the student happens to be, and none of them ever
@@ -166,7 +166,14 @@ def get(name: str | None) -> None:
 @click.option("--no-upgrade", is_flag=True,
               help="Do not upgrade `im` itself first.")
 def update(no_upgrade: bool) -> None:
-    """Refresh the course environment from the website."""
+    """Refresh the course folder's own files and environment.
+
+    The environment, the tasks, the script that points VS Code at pixi and VS
+    Code's own settings all live in files the student downloaded once and has
+    no reason to maintain, so a fix to any of them reaches them the same way:
+    whatever is out of date is replaced with what the website is publishing
+    now, and their own copy is kept beside it.
+    """
     folder = _folder()
 
     # `im update` is the command for putting the environment right, and `im`

@@ -37,6 +37,7 @@ MACHINE = "This machine"
 TOOL = "The im command"
 FOLDER = "Your course folder"
 PIXI = "pixi"
+SHELL = "Your terminal"
 ENVIRONMENT = "The course environment"
 SECURITY = "Security software"
 INTERNET = "Internet access"
@@ -97,6 +98,53 @@ SKIP_WHEN_LOOKING = frozenset({
 
 EXTENSIONS = (("ms-python.python", "Python"), ("ms-toolsai.jupyter", "Jupyter"))
 
+# The kernel every notebook starts. It names the environment's own Python by
+# its whole path, which makes it the second place on disk that still remembers
+# where the course folder stood when the environment was built.
+KERNEL_SPEC = ("share", "jupyter", "kernels", "python3", "kernel.json")
+
+# Scripts pixi writes with that same path in their first line. Windows gets
+# .exe files here instead, where the kernel above is the one that answers.
+SHEBANGS = (("bin", "pip"), ("bin", "jupyter"), ("bin", "im"), ("bin", "pytest"))
+
+# The files each shell reads when it starts, the one to write to first. pixi's
+# installer appends its PATH line to one of these, choosing by asking the same
+# question this does — so a student whose terminal runs a shell other than the
+# one the installer saw ends up with the line in a file nothing reads.
+STARTUP_FILES = {
+    "zsh": (".zshrc", ".zprofile", ".zshenv"),
+    "bash": (".bash_profile", ".bashrc", ".profile"),
+    "sh": (".profile",),
+    "dash": (".profile",),
+    "ksh": (".kshrc", ".profile"),
+    "fish": (".config/fish/config.fish",),
+}
+
+# Where the installer puts pixi, as it is written inside a startup file.
+PIXI_ON_PATH = ".pixi/bin"
+
+# Shells worth believing when the process that started `im` names one. Anything
+# else — pixi, VS Code, python — means `im` was not typed into a shell directly,
+# and $SHELL is the better answer.
+KNOWN_SHELLS = frozenset(STARTUP_FILES) | {"tcsh", "csh", "powershell", "pwsh", "cmd"}
+
+# What to call them in a sentence a student reads.
+SHELL_NAMES = {"powershell": "Windows PowerShell", "pwsh": "PowerShell",
+               "cmd": "Command Prompt"}
+
+# Asked of PowerShell: what it is enforcing, and then every scope, so that a
+# policy set by the university can be told from one the student can change.
+# Only single quotes, which survive being passed through Windows' own quoting.
+POLICY_QUERY = ("Get-ExecutionPolicy; Get-ExecutionPolicy -List | ForEach-Object "
+                "{ $_.Scope.ToString() + '=' + $_.ExecutionPolicy.ToString() }")
+
+# The order PowerShell reads them in: the first that is not Undefined wins.
+POLICY_SCOPES = ("MachinePolicy", "UserPolicy", "Process", "CurrentUser", "LocalMachine")
+
+# The two that stop the scripts pixi and VS Code write from running at all.
+POLICY_TITLES = {"restricted": "PowerShell is not allowed to run scripts",
+                 "allsigned": "PowerShell only runs scripts that are signed"}
+
 DRIVE_REMOVABLE, DRIVE_REMOTE = 2, 4
 
 
@@ -128,6 +176,9 @@ class Context:
     # The title of the finding that has already explained inspected traffic, so
     # that the next one to want that paragraph points at it instead.
     explained: str | None = None
+    # The shell this was typed into. Asking costs a process, two checks want
+    # the answer, and "" means it was asked and could not be told.
+    shell: str | None = None
 
 
 # --- small things the checks need ------------------------------------------ #
@@ -288,6 +339,49 @@ def likely_course_folders(home: Path | None = None, depth: int = 2,
     return found[:limit]
 
 
+def folder_inside(cwd: Path, depth: int = 2, budget: int = 60) -> Path | None:
+    """A course folder sitting just below this one, for a zip unpacked twice over.
+
+    Windows' "Extract all" offers a destination folder named after the zip, and
+    the zip already holds a folder of that name, so accepting the default —
+    which everybody does — leaves the course folder one level further down than
+    anyone expects: instructing-machines inside instructing-machines. What the
+    student then opens in VS Code is a folder with nothing in it but another
+    folder, and every command they are told to run is run in the wrong one of
+    the two, where there is no pixi.toml and nothing works.
+
+    Nothing is wrong with the copy itself, which is why this is worth telling
+    apart from a course folder that is genuinely missing: the fix is one `cd`
+    and not a download.
+    """
+    queue = [(cwd, 0)]
+    while queue and budget > 0:
+        place, level = queue.pop(0)
+        budget -= 1
+        try:
+            entries = sorted(place.iterdir())
+        except OSError:
+            continue
+        if place != cwd and any(e.name == MARKER and is_file(e) for e in entries):
+            return place
+        if level < depth:
+            for entry in entries:
+                if entry.name.startswith(".") or entry.name in SKIP_WHEN_LOOKING:
+                    continue
+                if is_dir(entry):
+                    queue.append((entry, level + 1))
+    return None
+
+
+def only_thing_in(cwd: Path, entry: Path) -> bool:
+    """Whether that folder is all this one holds, ignoring what unpacking leaves."""
+    try:
+        return not [e for e in cwd.iterdir()
+                    if e != entry and e.name != "__MACOSX" and not e.name.startswith(".")]
+    except OSError:
+        return False
+
+
 def search_briefly(seconds: float = 4.0) -> list[Path]:
     """`likely_course_folders`, abandoned if it takes longer than it is worth.
 
@@ -313,6 +407,120 @@ def search_briefly(seconds: float = 4.0) -> list[Path]:
     return list(answer)
 
 
+def parent_name(system: str) -> str | None:
+    """The name of the program `im` was started by, or None if it would not say."""
+    if system == "Windows":
+        said = security.powershell(f"(Get-Process -Id {os.getppid()}).ProcessName", 15)
+    else:
+        said = run_briefly(["ps", "-o", "comm=", "-p", str(os.getppid())], 5)
+    lines = [line.strip() for line in (said or "").splitlines() if line.strip()]
+    if not lines:
+        return None
+    # A login shell lists itself as -zsh, and macOS answers with a whole path.
+    name = Path(lines[0].lstrip("-")).name
+    if name.lower().endswith(".exe"):
+        name = name[:-4]
+    return name or None
+
+
+def shell_of(ctx: Context) -> str | None:
+    """The shell this terminal is running, asked once and remembered.
+
+    $SHELL is the login shell, which is a different question with a different
+    answer often enough to matter: the terminal VS Code opens, and a student
+    who once followed an instruction to use bash, both leave $SHELL naming a
+    shell nobody is typing into — and the startup file that has to hold pixi's
+    PATH line is the one the shell actually running reads.
+
+    So the process that started `im` is asked first, and $SHELL is the fallback
+    for when that answer is not a shell at all, which it is not when `im` was
+    run through pixi or from inside VS Code.
+    """
+    if ctx.shell is None:
+        found = parent_name(ctx.system) or ""
+        if found.lower() not in KNOWN_SHELLS:
+            found = Path(os.environ.get("SHELL") or "").name or found
+        ctx.shell = found.lower()
+    return ctx.shell or None
+
+
+def startup_files(shell: str | None, system: str = "", home: Path | None = None) -> list[Path]:
+    """The files that shell reads when it starts, the one to write to first.
+
+    macOS opens bash as a login shell, which reads .bash_profile and stops;
+    everywhere else it is .bashrc. Getting that the wrong way round is a line
+    added to a file the shell never opens, which looks exactly like having
+    done nothing.
+    """
+    home = home or Path.home()
+    shell = (shell or "").lower()
+    names = STARTUP_FILES.get(shell, ())
+    if shell == "bash" and system != "Darwin":
+        names = (".bashrc", ".bash_profile", ".profile")
+    base = home
+    if shell == "zsh" and os.environ.get("ZDOTDIR"):
+        base = Path(os.environ["ZDOTDIR"]).expanduser()
+    return [base.joinpath(*name.split("/")) for name in names]
+
+
+def pixi_on_startup(files: list[Path]) -> Path | None:
+    """The first of those files that puts pixi's own folder on PATH, if any does."""
+    for path in files:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if PIXI_ON_PATH in text.replace("\\", "/"):
+            return path
+    return None
+
+
+def path_line(shell: str | None) -> str:
+    """The line that puts pixi on PATH, written the way that shell writes it."""
+    if (shell or "").lower() == "fish":
+        return 'fish_add_path "$HOME/.pixi/bin"'
+    return 'export PATH="$HOME/.pixi/bin:$PATH"'
+
+
+def tilde(path: Path, home: Path | None = None) -> str:
+    """A path in the home folder as a student would type it."""
+    home = home or Path.home()
+    try:
+        return "~/" + path.relative_to(home).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def append_command(shell: str | None, target: Path) -> str:
+    """The one line that adds pixi to that shell's PATH for good."""
+    return f"echo '{path_line(shell)}' >> {tilde(target)}"
+
+
+def execution_policy() -> tuple[str, str | None] | None:
+    """What PowerShell allows scripts to do, and the scope that decides it.
+
+    The scope matters as much as the answer. A policy a student set, or one
+    Windows came with, is theirs to change in a single command; one arriving
+    through MachinePolicy or UserPolicy is the university's, and telling them
+    to run Set-ExecutionPolicy against it wastes the one thing they will try.
+    """
+    output = security.powershell(POLICY_QUERY)
+    if output is None:
+        return None
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if not lines:
+        return None
+    scopes = {}
+    for line in lines[1:]:
+        scope, _, value = line.partition("=")
+        scopes[scope.strip()] = value.strip()
+    for scope in POLICY_SCOPES:
+        value = scopes.get(scope, "")
+        if value and value.lower() != "undefined":
+            return lines[0], scope
+    return lines[0], None
+
+
 def missing_packages(python: Path, timeout: float = 120.0) -> list[str] | None:
     """The course packages that this Python cannot import, or None if it would not say."""
     output = run_briefly([python, "-c", PACKAGE_PROBE % (PACKAGES,)], timeout)
@@ -321,20 +529,76 @@ def missing_packages(python: Path, timeout: float = 120.0) -> list[str] | None:
     return [line.strip() for line in output.splitlines() if line.strip()]
 
 
-def built_for(env: Path) -> Path | None:
-    """The folder pixi built this environment for, if the environment says.
+def folder_of(path: Path) -> Path | None:
+    """The course folder a path inside .pixi belongs to, read off the path itself."""
+    for parent in path.parents:
+        if parent.name == ".pixi":
+            return parent.parent
+    return None
 
-    pixi stamps the manifest's full path into the environment when it builds
-    it, and that stamp is the only thing on disk that still remembers where the
-    folder was standing at the time. Older environments, and any built by conda
-    rather than pixi, carry no stamp; those get None and no opinion.
-    """
+
+def stamped_folder(env: Path) -> Path | None:
+    """The folder pixi wrote into the environment when it built it."""
     try:
         record = json.loads(env.joinpath(*ENV_RECORD).read_text(encoding="utf-8"))
         manifest = record["manifest_path"]
     except (OSError, ValueError, KeyError, TypeError):
         return None
     return Path(manifest).parent
+
+
+def kernel_folder(env: Path) -> Path | None:
+    """The folder named by the kernel every notebook in it starts."""
+    try:
+        spec = json.loads(env.joinpath(*KERNEL_SPEC).read_text(encoding="utf-8"))
+        argv = spec["argv"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    for word in argv if isinstance(argv, list) else []:
+        if isinstance(word, str) and ".pixi" in word:
+            return folder_of(Path(word))
+    return None
+
+
+def shebang_folder(env: Path) -> Path | None:
+    """The folder named in the first line of the scripts pixi wrote."""
+    for parts in SHEBANGS:
+        try:
+            with env.joinpath(*parts).open("rb") as handle:
+                first = handle.readline(400).decode("utf-8", "replace")
+        except OSError:
+            continue
+        if not first.startswith("#!"):
+            continue
+        for word in first[2:].split():
+            if ".pixi" in word:
+                return folder_of(Path(word.strip('"')))
+    return None
+
+
+def built_for(env: Path) -> Path | None:
+    """The folder this environment was built for, if anything inside it still says.
+
+    Three places remember, and any one of them is enough. pixi stamps the
+    manifest's full path in when it builds; the kernel spec names the
+    environment's own Python by its whole path, which is what a notebook
+    starts; and the scripts pixi writes carry that same path in their first
+    line. The stamp is asked first because pixi rewrites it on every install,
+    so it is the one that is never merely left over.
+
+    The other two are what answers for an environment built before pixi wrote
+    the stamp, or built by conda, which writes none — and those used to get no
+    opinion at all, which meant the commonest way to break a course folder went
+    unnoticed on exactly the machines least likely to spot it themselves.
+    """
+    for read in (stamped_folder, kernel_folder, shebang_folder):
+        try:
+            found = read(env)
+        except OSError:                 # an unreadable file is not an answer
+            found = None
+        if found is not None:
+            return found
+    return None
 
 
 def same_folder(one: Path, other: Path) -> bool:
@@ -545,6 +809,10 @@ def folder_check(ctx: Context) -> Finding:
     if ctx.folder is not None:
         return Finding(OK, FOLDER, str(ctx.folder))
 
+    inside = folder_inside(ctx.cwd)
+    if inside is not None:
+        return nested_finding(ctx, inside)
+
     advice = [
         f"Nothing here, and nothing in any folder above it, has a {MARKER} in it.",
         "`im get` and `im update` have nowhere to put anything from here, and",
@@ -562,6 +830,49 @@ def folder_check(ctx: Context) -> Finding:
         advice.append("(Terminal -> New Terminal). It always starts in the right place.")
     return Finding(FAIL, FOLDER, "You are not in your course folder",
                    [f"You are in {ctx.cwd}"], advice)
+
+
+def nested_finding(ctx: Context, inside: Path) -> Finding:
+    """What to say to someone standing one folder above their own course folder."""
+    windows = ctx.system == "Windows"
+    separator, browser = ("\\", "File Explorer") if windows else ("/", "Finder")
+    doubled = inside.parent == ctx.cwd and inside.name == ctx.cwd.name
+    alone = inside.parent == ctx.cwd and only_thing_in(ctx.cwd, inside)
+
+    detail = [f"You are in {ctx.cwd}", f"and your course folder is {inside}"]
+    if alone:
+        detail.append("which is the only thing in it")
+
+    advice = []
+    if doubled:
+        advice += [
+            "The zip was unpacked into a new folder named after itself, and it",
+            "already held a folder of that name, so everything ended up one level",
+            f"further down than it looks: {ctx.cwd.name}{separator}{inside.name}.",
+        ]
+        if windows:
+            advice.append('That is what the "Extract all" button offers by default.')
+        advice.append("")
+    advice += [
+        "Nothing is broken and nothing needs downloading again. The folder you",
+        "are in is not the one your work is in; the one inside it is.",
+        "",
+        "Change into it, and run this again from there:",
+        "",
+        f'    cd "{inside}"',
+        "    im doctor",
+        "",
+        "In VS Code, File -> Open Folder and pick that one, so that the terminal",
+        "it opens starts in the right place every time.",
+    ]
+    if doubled and alone:
+        advice += [
+            "",
+            f"If the extra folder is confusing, drag the inner one out in {browser} to",
+            "where the outer one is, and delete the empty one left behind.",
+        ]
+    return Finding(FAIL, FOLDER, "Your course folder is the one inside this one",
+                   detail, advice)
 
 
 def cloud_finding(ctx: Context, path: Path) -> Finding | None:
@@ -759,6 +1070,26 @@ def pixi_check(ctx: Context) -> Finding:
 
     already = security.pixi_locations()
     if already:
+        # A new terminal only helps if the line is in a file this shell reads.
+        # The installer writes it into the startup file of the shell it was run
+        # from, so a student who installed pixi in one shell and works in
+        # another can open new terminals all afternoon and never see it.
+        shell = shell_of(ctx)
+        files = startup_files(shell, ctx.system) if ctx.system != "Windows" else []
+        if files and pixi_on_startup(files) is None:
+            named = SHELL_NAMES.get(shell, shell)
+            return Finding(FAIL, PIXI, "pixi is installed, but this terminal cannot see it",
+                           [f"It is at {already[0]}",
+                            f"and nothing {named} reads when it starts puts it on PATH"], [
+                               "The installer adds pixi to the startup file of whichever shell",
+                               f"it was run from, and this terminal runs {named}, which reads",
+                               "different files. Opening a new terminal will not help: the line",
+                               "has to be in a file this shell reads.",
+                               "",
+                               "Put it there, then open a new terminal:",
+                               "",
+                               f"    {append_command(shell, files[0])}",
+                           ])
         return Finding(FAIL, PIXI, "pixi is installed, but this terminal cannot see it",
                        [f"It is at {already[0]}"], [
                            "The installer adds pixi to your PATH, and a terminal only reads",
@@ -779,6 +1110,128 @@ def pixi_check(ctx: Context) -> Finding:
         "",
         "Then close the terminal, open a new one, and run `im doctor` again.",
     ])
+
+
+def shell_finding(ctx: Context) -> Finding:
+    """Which shell this terminal is running, since the two below depend on it."""
+    shell = shell_of(ctx)
+    if shell is None:
+        return Finding(OK, SHELL, "Could not tell what this terminal is running")
+    # $SHELL is a POSIX idea; on Windows it is either absent or left over from
+    # something else, and either way it says nothing about this terminal.
+    login = os.environ.get("SHELL") if ctx.system != "Windows" else None
+    detail = []
+    if login and Path(login).name.lower() != shell:
+        detail.append(f"SHELL={login}, which is not what this terminal is running")
+    return Finding(OK, SHELL, SHELL_NAMES.get(shell, shell), detail)
+
+
+def scripts_finding(ctx: Context) -> Finding | None:
+    """Whether PowerShell may run the scripts pixi and VS Code write.
+
+    Windows ships refusing to run any script at all, and says so in a sentence
+    that names neither pixi nor the course: "running scripts is disabled on
+    this system". `pixi shell` writes a script and runs it, and so does VS
+    Code every time it activates an environment in its terminal, so this one
+    setting stops both while pixi itself keeps working perfectly.
+    """
+    if ctx.system != "Windows":
+        return None
+    answer = execution_policy()
+    if answer is None:
+        return None
+    policy, scope = answer
+    detail = [f"The execution policy is {policy}"
+              + (f", set for {scope}" if scope else ", which is Windows' own default")]
+    if policy.lower() not in POLICY_TITLES:
+        return Finding(OK, SHELL, "PowerShell is allowed to run scripts", detail)
+
+    # The two refuse in different words, and the words are what a student
+    # searches for, so the paragraph has to use the ones they were shown.
+    if policy.lower() == "restricted":
+        told = ['PowerShell will not run a script file here, and says "running',
+                'scripts is disabled on this system".']
+    else:
+        told = ["PowerShell will not run a script file here unless somebody has",
+                'signed it, and says a script "is not digitally signed".']
+    told += ["`pixi shell` writes one and runs it, and so does VS Code every time",
+             "it activates an environment in its terminal, so both fail on this",
+             "alone while pixi itself keeps working."]
+    if scope in ("MachinePolicy", "UserPolicy"):
+        advice = told + [
+            "",
+            f"This one is set by {scope}, which is a rule on the machine rather",
+            "than a setting of yours, so `Set-ExecutionPolicy -Scope CurrentUser`",
+            "will not change it. Start a PowerShell with the rule set aside for",
+            "that one window, and work in it:",
+            "",
+            "    powershell -ExecutionPolicy Bypass",
+            "",
+            "If this is a university laptop, its IT support can lift the rule.",
+        ]
+    else:
+        advice = told + [
+            "",
+            "Allow scripts for your own account, which is the setting Microsoft",
+            "recommends and needs no administrator:",
+            "",
+            "    Set-ExecutionPolicy RemoteSigned -Scope CurrentUser",
+            "",
+            "Answer Y. It changes nothing for anyone else who uses this computer.",
+        ]
+    return Finding(WARN, SHELL, POLICY_TITLES[policy.lower()], detail, advice)
+
+
+def pixi_path_finding(ctx: Context) -> Finding | None:
+    """Whether this shell puts pixi on PATH itself, or only happens to have it.
+
+    Being able to see pixi now is not the same as being able to see it
+    tomorrow. A student who was walked through `export PATH=...` in class, in
+    the terminal they had open at the time, has a machine that works until the
+    next terminal and then does not, and `pixi: command not found` says nothing
+    about which of the two happened.
+    """
+    # Windows keeps its PATH in the registry rather than in a startup file, and
+    # a pixi nobody can see is pixi_check's to explain, whole.
+    if ctx.system == "Windows" or ctx.pixi is None:
+        return None
+    installer = Path.home() / ".pixi" / "bin"
+    try:
+        theirs = Path(ctx.pixi).resolve().parent == installer.resolve()
+    except OSError:
+        theirs = Path(ctx.pixi).parent == installer
+    if not theirs:
+        return Finding(OK, SHELL, "pixi is on this terminal's PATH",
+                       [f"from {Path(ctx.pixi).parent}, not from {installer}"])
+
+    shell = shell_of(ctx)
+    files = startup_files(shell, ctx.system)
+    if not files:
+        return Finding(OK, SHELL, "pixi is on this terminal's PATH", [str(installer)])
+    found = pixi_on_startup(files)
+    if found is not None:
+        return Finding(OK, SHELL, f"{tilde(found)} puts pixi on PATH")
+    named = SHELL_NAMES.get(shell, shell)
+    return Finding(WARN, SHELL, f"Nothing {named} reads when it starts puts pixi on PATH",
+                   [f"pixi is on PATH here, at {ctx.pixi}",
+                    "but it was not put there by " +
+                    ", ".join(tilde(path) for path in files)], [
+                       "It works in this terminal and may not work in the next one, and",
+                       "`pixi: command not found` in a terminal that worked yesterday is",
+                       "what that looks like. Write the line into the file this shell",
+                       "reads, so that every terminal has it:",
+                       "",
+                       f"    {append_command(shell, files[0])}",
+                       "",
+                       f"Then open a new terminal, or run `source {tilde(files[0])}` here.",
+                   ])
+
+
+def shell_checks(ctx: Context) -> list[Finding]:
+    """The terminal itself: which shell, and the two things it decides."""
+    return [finding for finding in (shell_finding(ctx),
+                                    scripts_finding(ctx),
+                                    pixi_path_finding(ctx)) if finding is not None]
 
 
 def environment_check(ctx: Context) -> list[Finding]:
@@ -809,14 +1262,14 @@ def environment_check(ctx: Context) -> list[Finding]:
         findings.append(Finding(WARN, ENVIRONMENT, "There is no pixi.lock", [], [
             "Without it, pixi solves the environment from scratch and may not",
             "build the same one everyone else has. Run `im update` to fetch the",
-            "course's current pixi.toml and pixi.lock.",
+            "course's current copy of it.",
         ]))
     elif manifest.exists() and manifest.stat().st_mtime > lock.stat().st_mtime + 1:
         findings.append(Finding(WARN, ENVIRONMENT, "pixi.toml has changed since pixi.lock was made",
                                 [], [
                                     "The environment on disk may not be the one pixi.toml now asks",
                                     "for. Run `pixi install` in your course folder to catch it up,",
-                                    "or `im update` to take the course's current pair of files.",
+                                    "or `im update` to take the course's current files instead.",
                                 ]))
     return findings
 
@@ -875,7 +1328,8 @@ def packages_check(ctx: Context) -> Finding | None:
         return Finding(OK, ENVIRONMENT, "Everything the course needs is in it")
     return Finding(FAIL, ENVIRONMENT, f"{len(missing)} of its packages are missing", missing, [
         "Run `im update` in your course folder. It fetches the course's current",
-        "pixi.toml and pixi.lock and installs them, which is what puts these back.",
+        "pixi.toml and pixi.lock and installs them, which is what puts these",
+        "back — along with anything else in the folder's setup that has moved on.",
         "",
         "If that fails on the download, the internet checks below are where the",
         "reason will be.",
@@ -904,6 +1358,113 @@ def interpreter_check(ctx: Context) -> Finding | None:
                        "Run that one through pixi, from your course folder:",
                        "",
                        "    pixi run im check",
+                   ])
+
+
+def activation_check(ctx: Context) -> Finding | None:
+    """Whether this terminal is standing inside the course environment.
+
+    Installed is not the same as in use. Until the environment is activated,
+    `python`, `pytest` and `jupyter` typed into a terminal are whichever ones
+    the machine already had, and the import error that follows names a package
+    the student can see plainly installed a folder away. Which environment is
+    active matters just as much when it is the wrong one: an Anaconda that
+    activates `base` in every new terminal shadows the course's Python with one
+    that has none of the course's packages in it.
+
+    Only asked once the environment exists, because telling someone to step
+    into what has not been built yet is two instructions in the wrong order.
+    """
+    if ctx.folder is None or ctx.env_python is None:
+        return None
+    env = ctx.folder.joinpath(*ENV_PATH)
+    root = os.environ.get("PIXI_PROJECT_ROOT")
+    prefix = os.environ.get("CONDA_PREFIX")
+    venv = os.environ.get("VIRTUAL_ENV")
+    active = Path(prefix or venv) if (prefix or venv) else None
+
+    if active is not None and same_folder(active, env):
+        named = os.environ.get("PIXI_ENVIRONMENT_NAME") or "default"
+        return Finding(OK, ENVIRONMENT, "It is active in this terminal",
+                       [f"the {named} environment, at {env}"])
+
+    def into(opening: str, *first: str) -> list[str]:
+        """The way out of whatever is active here, and the way into the course's."""
+        return [opening,
+                "",
+                *(f"    {command}" for command in first),
+                "    pixi shell",
+                "",
+                "The prompt changes while you are in it, and `exit` leaves again. Or",
+                "run a single command through pixi without stepping in at all:",
+                "",
+                "    pixi run im check"]
+
+    step = into("Step into it. From your course folder, or anywhere inside it:")
+    instead = "Leave it and step into the course one, from your course folder:"
+
+    if active is None and not root:
+        return Finding(WARN, ENVIRONMENT, "It is not active in this terminal", [], [
+            "It is installed, but nothing in this terminal is using it, so",
+            "`python`, `pytest` and `jupyter` typed here are whichever ones the",
+            "machine already had rather than the ones the course installed. That",
+            "is why an import can fail in the terminal and work in a notebook.",
+            "",
+            *step,
+            "",
+            "Notebooks in VS Code do not go through this: they pick their kernel",
+            "themselves, in the picker at the top right.",
+        ])
+
+    if root and ctx.folder is not None and same_folder(Path(root), ctx.folder):
+        named = os.environ.get("PIXI_ENVIRONMENT_NAME") or "another"
+        return Finding(WARN, ENVIRONMENT,
+                       f"The {named} environment is active here, not the course one",
+                       [f"{named}, at {active}", f"The course environment is {env}"], [
+                           "This course folder has more than one environment in it, and the",
+                           "one this terminal is in is not the one the course uses.",
+                           "",
+                           "    exit",
+                           "    pixi shell",
+                       ])
+
+    if root:
+        return Finding(WARN, ENVIRONMENT, "A pixi environment from another folder is active",
+                       [f"PIXI_PROJECT_ROOT={root}", f"The course environment is {env}"], [
+                           "This terminal is inside a pixi environment belonging to a",
+                           "different project, so its packages are the ones you get here and",
+                           "the course's are not.",
+                           "",
+                           "Leave it and step into this one:",
+                           "",
+                           "    exit",
+                           f'    cd "{ctx.folder}"',
+                           "    pixi shell",
+                       ])
+
+    if venv and not prefix:
+        return Finding(WARN, ENVIRONMENT, "A Python virtual environment is active here",
+                       [f"VIRTUAL_ENV={venv}", f"The course environment is {env}"], [
+                           "`python` and `pip` in this terminal are that environment's, not",
+                           "the course's, and a package the course installed will look",
+                           "missing here.",
+                           "",
+                           *into(instead, "deactivate"),
+                       ])
+
+    named = os.environ.get("CONDA_DEFAULT_ENV") or "A conda environment"
+    return Finding(WARN, ENVIRONMENT, f"{named} is active in this terminal, not the course one",
+                   [f"CONDA_PREFIX={prefix}", f"The course environment is {env}"], [
+                       "`python`, `pip` and `jupyter` in this terminal are that",
+                       "environment's, so a package the course installed will look missing",
+                       "and one it never installed will appear to be there.",
+                       "",
+                       *into(instead, "conda deactivate"),
+                       "",
+                       "If a conda environment activates itself in every new terminal, that",
+                       "is Anaconda doing it, and this turns it off for good:",
+                       "",
+                       "    conda config --set auto_activate_base false",
                    ])
 
 
@@ -1246,10 +1807,12 @@ CHECKS = (
     writable_check,
     disk_check,
     pixi_check,
+    shell_checks,
     environment_check,
     moved_check,
     packages_check,
     interpreter_check,
+    activation_check,
     security_check,
     proxy_check,
     network_check,
