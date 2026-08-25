@@ -79,6 +79,18 @@ CERTIFICATE_VARIABLES = (
     "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS", "PIP_CERT",
 )
 
+# Except when pixi set one itself. The openssl conda package ships an
+# activation script that points SSL_CERT_FILE and SSL_CERT_DIR at the
+# certificates inside the environment, and leaves a marker behind saying it was
+# the one that did it. Every environment with openssl in it — which is every
+# environment with Python in it — would otherwise report itself as a terminal
+# pointed at somebody else's certificate authorities, on every run, to every
+# student. A warning that fires for everybody is one that nobody reads.
+CONDA_SET_MARKERS = {
+    "SSL_CERT_FILE": "__CONDA_OPENSSL_CERT_FILE_SET",
+    "SSL_CERT_DIR": "__CONDA_OPENSSL_CERT_DIR_SET",
+}
+
 # Folders that sync. A pixi environment is tens of thousands of small files and
 # belongs in none of them.
 CLOUD_FOLDERS = (
@@ -131,6 +143,11 @@ KNOWN_SHELLS = frozenset(STARTUP_FILES) | {"tcsh", "csh", "powershell", "pwsh", 
 # What to call them in a sentence a student reads.
 SHELL_NAMES = {"powershell": "Windows PowerShell", "pwsh": "PowerShell",
                "cmd": "Command Prompt"}
+
+# On Windows only. A bash there is the one that arrived with Git, and calling
+# it that is how a student recognises the window they are sitting in; a bash on
+# a Mac is just bash, and this must not reach it.
+WINDOWS_SHELL_NAMES = {**SHELL_NAMES, "bash": "Git Bash", "sh": "Git Bash"}
 
 # Asked of PowerShell: what it is enforcing, and then every scope, so that a
 # policy set by the university can be told from one the student can change.
@@ -449,13 +466,19 @@ def parent_name(system: str) -> str | None:
     else:
         said = run_briefly(["ps", "-o", "comm=", "-p", str(os.getppid())], 5)
     lines = [line.strip() for line in (said or "").splitlines() if line.strip()]
-    if not lines:
-        return None
-    # A login shell lists itself as -zsh, and macOS answers with a whole path.
-    name = Path(lines[0].lstrip("-")).name
-    if name.lower().endswith(".exe"):
-        name = name[:-4]
-    return name or None
+    return (shell_named(lines[0]) or None) if lines else None
+
+
+def shell_named(value: str | None) -> str:
+    """A shell's name out of a path or a process name, however it was written.
+
+    A login shell lists itself as -zsh, macOS answers with a whole path, and
+    Windows answers with one that ends in .exe — including $SHELL, which Git
+    for Windows sets to the bash.exe inside its own installation. Left on,
+    that suffix makes "bash.exe" a shell nothing here has heard of.
+    """
+    name = Path((value or "").strip().lstrip("-")).name.lower()
+    return name[:-4] if name.endswith(".exe") else name
 
 
 def shell_of(ctx: Context) -> str | None:
@@ -469,14 +492,84 @@ def shell_of(ctx: Context) -> str | None:
 
     So the process that started `im` is asked first, and $SHELL is the fallback
     for when that answer is not a shell at all, which it is not when `im` was
-    run through pixi or from inside VS Code.
+    run through pixi or from inside VS Code. When neither says, the answer is
+    that nobody knows: `im` run through `pixi run` on Windows is started by
+    pixi and has no $SHELL to fall back on, and reporting "this terminal is
+    running pixi" would be a plain untruth on which three fixes then depend.
     """
     if ctx.shell is None:
-        found = parent_name(ctx.system) or ""
-        if found.lower() not in KNOWN_SHELLS:
-            found = Path(os.environ.get("SHELL") or "").name or found
-        ctx.shell = found.lower()
+        found = shell_named(parent_name(ctx.system))
+        if found not in KNOWN_SHELLS:
+            found = shell_named(os.environ.get("SHELL"))
+        ctx.shell = found
     return ctx.shell or None
+
+
+def windows_dialect(ctx: Context) -> str:
+    """Which of Windows' three terminals to write the fix commands for.
+
+    They do not share a language. PowerShell's own `Remove-Item Env:X` and
+    `Set-ExecutionPolicy` are errors in Command Prompt, and neither `move` nor
+    either of those exists in the Git Bash that arrives with Git. A command
+    written for the wrong one is a second dead end handed to somebody who is
+    already stuck, and it reads to them as the fix being wrong rather than as
+    being typed in the wrong window.
+
+    Unknown counts as PowerShell. It is what VS Code opens on Windows, what the
+    Start menu offers, and what the course asks students to use, so it is the
+    one to be wrong about least often — and `im` run through `pixi run` leaves
+    the shell unknown while very probably standing in it.
+    """
+    shell = shell_of(ctx) or ""
+    if shell == "cmd":
+        return "cmd"
+    if shell in STARTUP_FILES or shell in ("tcsh", "csh"):
+        return "posix"                          # Git Bash, or an MSYS/Cygwin shell
+    return "powershell"
+
+
+def unset_lines(ctx: Context, names: list[str]) -> list[str]:
+    """The commands that clear these variables, in the shell being typed into."""
+    dialect = windows_dialect(ctx) if ctx.system == "Windows" else "posix"
+    if dialect == "cmd":
+        return [f"    set {name}=" for name in names]
+    if dialect == "powershell":
+        return [f"    Remove-Item Env:{name}" for name in names]
+    return [f"    unset {name}" for name in names]
+
+
+def move_command(ctx: Context, source: Path, target: Path | str) -> str:
+    """Moving a folder, in the shell being typed into.
+
+    `move` is Command Prompt's and an alias PowerShell keeps for it; Git Bash
+    has neither, and takes a Windows path with drive letter and backslashes
+    quite happily as long as the command is `mv`.
+    """
+    if ctx.system == "Windows" and windows_dialect(ctx) != "posix":
+        return f'move "{source}" "{target}"'
+    return f'mv "{source}" "{target}"'
+
+
+def in_powershell(ctx: Context, command: str) -> list[str]:
+    """One PowerShell command, written to be pasted where the student is standing.
+
+    From Command Prompt or Git Bash it has to be handed to PowerShell, and the
+    line says where it is going so that a student who is about to be told to
+    work in PowerShell afterwards can see that this is the same place.
+
+    -NoProfile because the PowerShell this starts would otherwise read the
+    student's profile on the way in, and a profile is a script: under the very
+    policy being fixed here, the fix prints "running scripts is disabled on
+    this system" — the exact sentence it was pasted in to get rid of — and then
+    quietly succeeds underneath it. Nobody reads that as having worked.
+    """
+    if ctx.system != "Windows" or windows_dialect(ctx) == "powershell":
+        return [f"    {command}"]
+    named = WINDOWS_SHELL_NAMES.get(shell_of(ctx) or "", "this terminal")
+    return [f"You are in {named}, and this is PowerShell's own setting, so",
+            "hand the command to PowerShell:",
+            "",
+            f'    powershell -NoProfile -Command "{command}"']
 
 
 def startup_files(shell: str | None, system: str = "", home: Path | None = None) -> list[Path]:
@@ -986,8 +1079,7 @@ def cloud_finding(ctx: Context, path: Path) -> Finding | None:
         return None
 
     elsewhere = Path.home() / path.name
-    move = f'move "{path}" "{elsewhere}"' if ctx.system == "Windows" \
-        else f'mv "{path}" "{elsewhere}"'
+    move = move_command(ctx, path, elsewhere)
     return Finding(WARN, FOLDER, f"Your course folder is inside {service}", [str(path)], [
         "A pixi environment is tens of thousands of small files, and a folder",
         f"that syncs will try to upload every one of them. That fills up {service},",
@@ -1014,8 +1106,7 @@ def letters_finding(ctx: Context, path: Path) -> Finding | None:
     if not odd:
         return None
     elsewhere = "C:\\im-course" if ctx.system == "Windows" else "/Users/Shared/im-course"
-    move = f'move "{path}" {elsewhere}' if ctx.system == "Windows" \
-        else f'mv "{path}" {elsewhere}'
+    move = move_command(ctx, path, elsewhere)
     return Finding(WARN, FOLDER, "The path has letters in it that some tools mishandle",
                    [str(path), "The letters are: " + " ".join(odd)], [
                        "Some of the tools underneath pixi still assume plain English",
@@ -1049,6 +1140,7 @@ def length_finding(ctx: Context, path: Path) -> Finding | None:
     else:
         return None
 
+    move = move_command(ctx, path, "C:\\im-course")
     return Finding(status, FOLDER, "The path to your course folder is long",
                    [f"{length} characters: {path}",
                     f"Long path support is {'on' if enabled else 'off'}"], [
@@ -1059,13 +1151,13 @@ def length_finding(ctx: Context, path: Path) -> Finding | None:
                        "",
                        "Move the course folder near the top of the drive:",
                        "",
-                       f'    move "{path}" C:\\im-course',
-                       "    cd C:\\im-course",
+                       f"    {move}",
+                       '    cd "C:\\im-course"',
                        "    pixi install",
                    ], fix=["Move the course folder near the top of the drive:",
                            "",
-                           f'    move "{path}" C:\\im-course',
-                           "    cd C:\\im-course",
+                           f"    {move}",
+                           '    cd "C:\\im-course"',
                            "    pixi install"])
 
 
@@ -1250,9 +1342,10 @@ def shell_finding(ctx: Context) -> Finding:
     # something else, and either way it says nothing about this terminal.
     login = os.environ.get("SHELL") if ctx.system != "Windows" else None
     detail = []
-    if login and Path(login).name.lower() != shell:
+    if login and shell_named(login) != shell:
         detail.append(f"SHELL={login}, which is not what this terminal is running")
-    return Finding(OK, SHELL, SHELL_NAMES.get(shell, shell), detail)
+    names = WINDOWS_SHELL_NAMES if ctx.system == "Windows" else SHELL_NAMES
+    return Finding(OK, SHELL, names.get(shell, shell), detail)
 
 
 def enforcing(value: str, scope: str | None, lead: str) -> str:
@@ -1327,34 +1420,69 @@ def scripts_finding(ctx: Context) -> Finding | None:
         ] + told
 
     if policy.lasting_scope in IMPOSED_SCOPES:
+        # Nothing typed at a prompt gets round this one. MachinePolicy and
+        # UserPolicy sit above every other scope, so `Set-ExecutionPolicy` is
+        # refused and `powershell -ExecutionPolicy Bypass` is accepted and then
+        # ignored — the window opens, reports the imposed policy, and refuses
+        # scripts exactly as before. Offering it would cost a student on a
+        # locked-down university laptop the one thing they are going to try.
+        #
+        # What does work is leaving PowerShell. The execution policy is
+        # PowerShell's own and binds nothing else: Command Prompt runs `pixi
+        # shell` under an imposed AllSigned without a murmur.
+        already = ctx.system == "Windows" and windows_dialect(ctx) != "powershell"
+        here = WINDOWS_SHELL_NAMES.get(shell_of(ctx) or "", "This terminal")
+        elsewhere = ([f"{here} is not bound by it, so what you are typing into now is",
+                      "already a terminal that works. It is VS Code's terminal that will",
+                      "fail, because that one is a PowerShell."]
+                     if already else
+                     ["Command Prompt is not bound by it, and runs `pixi shell` perfectly",
+                      "well. Start one and work in there:",
+                      "",
+                      "    cmd"])
+        vscode = ["In VS Code, open the dropdown beside the + on the terminal panel,",
+                  "choose Select Default Profile and pick Command Prompt. Terminals",
+                  "opened after that are ones the rule does not touch."]
         advice = told + [
             "",
             f"It is set by {policy.lasting_scope}, which is a rule on the machine",
-            "rather than a setting of yours, so `Set-ExecutionPolicy -Scope",
-            "CurrentUser` will not change it. Start a PowerShell with the rule",
-            "set aside for that one window, and work in it:",
+            "rather than a setting of yours. Nothing you can type gets round it:",
+            "`Set-ExecutionPolicy` is refused, and `powershell -ExecutionPolicy",
+            "Bypass` is accepted and then overruled, so that window refuses",
+            "scripts exactly as this one does.",
             "",
-            "    powershell -ExecutionPolicy Bypass",
+            "The rule is PowerShell's own, though, and binds nothing else.",
+            *elsewhere,
             "",
-            "If this is a university laptop, its IT support can lift the rule.",
+            *vscode,
+            "",
+            "`pixi run im check` works from anywhere, PowerShell included, because",
+            "it starts no shell. If this is a university laptop, its IT support",
+            "can lift the rule.",
         ]
-        short = ["This is set by the machine, so start a PowerShell with the rule",
-                 "set aside and work in that window:",
-                 "",
-                 "    powershell -ExecutionPolicy Bypass"]
+        short = ([f"This is set by the machine and only PowerShell obeys it, so {here}",
+                  "is fine. Set VS Code's terminal to Command Prompt: the dropdown",
+                  "beside the + on the terminal panel -> Select Default Profile."]
+                 if already else
+                 ["This is set by the machine, and only PowerShell obeys it. Work in",
+                  "Command Prompt instead:",
+                  "",
+                  "    cmd",
+                  "",
+                  "In VS Code: the dropdown beside the + on the terminal panel ->",
+                  "Select Default Profile -> Command Prompt."])
     else:
+        allow = in_powershell(ctx, "Set-ExecutionPolicy RemoteSigned -Scope CurrentUser")
         advice = told + [
             "",
             "Allow scripts for your own account, which is the setting Microsoft",
             "recommends, needs no administrator, and outlives the window:",
             "",
-            "    Set-ExecutionPolicy RemoteSigned -Scope CurrentUser",
+            *allow,
             "",
             "Answer Y. It changes nothing for anyone else who uses this computer.",
         ]
-        short = ["Run this and answer Y:",
-                 "",
-                 "    Set-ExecutionPolicy RemoteSigned -Scope CurrentUser"]
+        short = [*allow, "", "Answer Y when it asks."] if len(allow) > 1 else             ["Run this and answer Y:", "", *allow]
 
     title = POLICY_TITLES[blocking.lower()] if here else \
         "PowerShell will refuse scripts in the next window you open"
@@ -1777,10 +1905,51 @@ def security_check(ctx: Context) -> list[Finding]:
     return findings
 
 
+def set_by_pixi(name: str, value: str) -> bool:
+    """Whether a certificate setting is the environment's own doing.
+
+    Two ways of telling, because the second outlives the first: the marker
+    conda's activation leaves behind, and the value pointing inside the
+    environment that is active. Either one means the setting arrived with pixi
+    rather than from whoever is being asked about it.
+    """
+    if os.environ.get(CONDA_SET_MARKERS.get(name, "")):
+        return True
+    prefix = os.environ.get("CONDA_PREFIX")
+    if not prefix:
+        return False
+    try:
+        return Path(value).resolve().is_relative_to(Path(prefix).resolve())
+    except (OSError, ValueError):
+        return False
+
+
+def named_once(ctx: Context, names: tuple[str, ...]) -> list[str]:
+    """The ones actually set, without saying the same variable twice.
+
+    Windows has no case in its environment, so HTTP_PROXY and http_proxy are
+    one variable wearing two names there, and listing both would ask a student
+    to clear something twice.
+    """
+    found: list[str] = []
+    for name in names:
+        if not os.environ.get(name):
+            continue
+        if ctx.system == "Windows" and any(seen.lower() == name.lower() for seen in found):
+            continue
+        found.append(name)
+    return found
+
+
 def proxy_check(ctx: Context) -> Finding | None:
     """Settings in this terminal that send downloads somewhere else."""
-    proxies = [(name, os.environ[name]) for name in PROXY_VARIABLES if os.environ.get(name)]
-    bundles = [(name, os.environ[name]) for name in CERTIFICATE_VARIABLES if os.environ.get(name)]
+    proxies = [(name, os.environ[name]) for name in named_once(ctx, PROXY_VARIABLES)]
+    bundles = [(name, os.environ[name]) for name in named_once(ctx, CERTIFICATE_VARIABLES)
+               if not set_by_pixi(name, os.environ[name])]
+    # NO_PROXY on its own is a list of addresses to send straight out, which
+    # only means anything when something else is doing the redirecting.
+    if all(name.upper() == "NO_PROXY" for name, _ in proxies):
+        proxies = []
     if not proxies and not bundles:
         return None
 
@@ -1794,19 +1963,36 @@ def proxy_check(ctx: Context) -> Finding | None:
                            "",
                            "Unset it in this terminal and try again:",
                            "",
-                           *(f"    unset {name}" if ctx.system != "Windows"
-                             else f"    Remove-Item Env:{name}" for name in broken),
+                           *unset_lines(ctx, broken),
                        ], fix=["Unset it in this terminal and try again:",
                                "",
-                               *(f"    unset {name}" if ctx.system != "Windows"
-                                 else f"    Remove-Item Env:{name}" for name in broken)])
-    return Finding(WARN, INTERNET, "This terminal redirects downloads", detail, [
-        "These settings send downloads through somewhere else, or point at a",
-        "different list of certificate authorities. If you did not set them",
-        "deliberately — a university network guide, or another course, often",
-        "does — they can break pixi on their own while a browser stays happy.",
-    ], fix=["If you did not set these on purpose, unset them and try again.",
-            "They can break pixi on their own while a browser stays happy."])
+                               *unset_lines(ctx, broken)])
+
+    names = [name for name, _ in proxies + bundles]
+    named = ", ".join(names)
+    many = len(names) > 1
+    it, them, verb = ("they", "them", "") if many else ("it", "it", "s")
+    what = (f"send{verb} downloads through somewhere else" if proxies
+            else f"point{verb} downloads at a different list of certificate authorities")
+    return Finding(WARN, INTERNET,
+                   f"These are set in this terminal: {named}" if many
+                   else f"{named} is set in this terminal", detail, [
+        *textwrap.wrap(f"{named} {what}. Pixi did not set that; something else "
+                       f"did, and a university network guide, a VPN client or "
+                       f"another course is usually the something. A setting like "
+                       f"this can break pixi on its own while a browser carries "
+                       f"on working, which is what makes it worth naming.", 70),
+        "",
+        f"If you did not set {them} on purpose, clear {them} and try again:",
+        "",
+        *unset_lines(ctx, names),
+    ], fix=[*textwrap.wrap(f"Something set {named} in this terminal, and {it} "
+                           f"{what}. That can break pixi on its own while a "
+                           f"browser stays happy.", 70),
+            "",
+            f"If you did not set {them} on purpose, clear {them} and try again:",
+            "",
+            *unset_lines(ctx, names)])
 
 
 def network_check(ctx: Context) -> list[Finding]:

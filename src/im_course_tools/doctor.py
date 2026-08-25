@@ -52,20 +52,46 @@ REPORT_VARIABLES = (
 PLAIN = {OK: "[ok]", WARN: "[! ]", FAIL: "[xx]"}
 
 
-def marks(stream=None) -> dict[str, str]:
-    """The three symbols, in whichever alphabet this terminal can actually print.
+def printable(stream=None) -> bool:
+    """Whether this terminal can print the characters the answer is written in.
 
     An older Windows terminal is still on a code page with no tick in it, and
-    writing one there raises rather than degrading. Asking first costs nothing
-    and keeps the report readable in the place it is most needed.
+    Windows redirected to a file is on the machine's own code page rather than
+    on whatever the terminal was showing. Writing a character the code page has
+    not got raises rather than degrading, and it raises inside `click.echo` —
+    which is to say in the middle of the answer, taking the rest of it with it.
     """
     stream = sys.stdout if stream is None else stream
     encoding = getattr(stream, "encoding", None) or "ascii"
     try:
-        "✓✗".encode(encoding)
+        "✓✗—".encode(encoding)
     except (LookupError, UnicodeEncodeError):
+        return False
+    return True
+
+
+def marks(stream=None) -> dict[str, str]:
+    """The three symbols, in whichever alphabet this terminal can actually print."""
+    if not printable(stream):
         return {OK: "+", WARN: "!", FAIL: "x"}
     return {OK: "✓", WARN: "!", FAIL: "✗"}
+
+
+# The punctuation the explanations are actually written with, and what each of
+# them becomes on a terminal that has not got it. An em dash traded for a
+# double hyphen is a poor bargain, and a far better one than the command
+# underneath it never reaching the screen at all.
+PUNCTUATION = (("—", "--"), ("–", "-"), ("’", "'"), ("‘", "'"),
+               ("“", '"'), ("”", '"'), ("…", "..."))
+
+
+def sayable(line: str, plain: bool) -> str:
+    """One line of the answer, in letters this terminal will not choke on."""
+    if not plain:
+        return line
+    for fancy, plainer in PUNCTUATION:
+        line = line.replace(fancy, plainer)
+    return line.encode("ascii", "replace").decode("ascii")
 
 
 def findings_for(context: Context, checks=CHECKS):
@@ -216,6 +242,10 @@ def diagnose(echo, *, offline: bool = False, report: bool = False,
                       cwd=Path(cwd) if cwd else Path.cwd(),
                       offline=offline)
     mark = marks(stream)
+    # Asked once, and every line that reaches the screen goes through it. The
+    # report is a file written as UTF-8 whatever the terminal is, so it keeps
+    # the punctuation the terminal could not have shown.
+    plain = not printable(stream)
 
     # Stopped rather than finished, when a check says nothing after it can
     # mean anything. The one that does is being outside the course folder.
@@ -233,7 +263,8 @@ def diagnose(echo, *, offline: bool = False, report: bool = False,
         if not announced and context.folder is not None:
             announced = True
             echo("")
-            echo("Looking at your setup. The internet checks take a few seconds.")
+            echo(sayable("Looking at your setup. The internet checks take a few "
+                         "seconds.", plain))
     stopped = bool(findings) and findings[-1].stop
     wrong = trouble_first(findings)
 
@@ -272,12 +303,12 @@ def diagnose(echo, *, offline: bool = False, report: bool = False,
         except OSError as error:
             said += ["", f"Could not write the report: {error}"]
             for line in padded(said):
-                echo(line)
+                echo(sayable(line, plain))
             return 1
         said += ["", f"Written to {target}", "",
                  "Send that file to your instructor. It holds no passwords."]
 
     for line in padded(said):
-        echo(line)
+        echo(sayable(line, plain))
 
     return 1 if any(finding.status == FAIL for finding in findings) else 0

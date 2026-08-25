@@ -285,19 +285,27 @@ def pixi_download(executable=None, timeout: float = 45.0) -> Download:
     if executable is None:
         return Download(NOT_TRIED)
 
+    # Emptied by hand rather than by TemporaryDirectory, because its own
+    # cleanup raises, and it raises OSError, and the only thing to do with an
+    # OSError from around here is report that pixi never got to try. On Windows
+    # a cache pixi has just written is exactly where a file left open or marked
+    # read-only turns up, so that would mean answering "pixi could not even
+    # start" on the strength of a download that had in fact just succeeded.
+    cache = tempfile.mkdtemp(prefix="im-doctor-")
     try:
-        with tempfile.TemporaryDirectory(prefix="im-doctor-") as cache:
-            finished = subprocess.run(
-                [str(executable), *PIXI_SEARCH],
-                capture_output=True, text=True, timeout=timeout,
-                env=dict(os.environ, PIXI_CACHE_DIR=cache, RATTLER_CACHE_DIR=cache,
-                         PIXI_NO_PROGRESS="true", PIXI_COLOR="never"),
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
+        finished = subprocess.run(
+            [str(executable), *PIXI_SEARCH],
+            capture_output=True, text=True, timeout=timeout,
+            env=dict(os.environ, PIXI_CACHE_DIR=cache, RATTLER_CACHE_DIR=cache,
+                     PIXI_NO_PROGRESS="true", PIXI_COLOR="never"),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
     except subprocess.TimeoutExpired:
         return Download(SLOW, [f"it was still trying after {timeout:.0f} seconds"])
     except (OSError, subprocess.SubprocessError) as error:
         return Download(NOT_TRIED, [str(error)])
+    finally:
+        shutil.rmtree(cache, ignore_errors=True)
 
     if finished.returncode == 0:
         return Download(DOWNLOADED)

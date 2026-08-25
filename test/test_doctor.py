@@ -10,6 +10,7 @@ ones that cannot be arranged on demand.
 import json
 import platform
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -34,6 +35,21 @@ def course(tmp_path: Path) -> Path:
 @pytest.fixture
 def here(tmp_path: Path) -> Context:
     return Context(system=platform.system(), cwd=tmp_path)
+
+
+@pytest.fixture
+def ordinary_folder() -> Path:
+    """A course folder at a path with nothing remarkable about it, length included.
+
+    pytest's tmp_path is ninety-odd characters deep on Windows, which the
+    length check is right to have an opinion about, so a test that means
+    "ordinary" cannot use it.
+    """
+    with tempfile.TemporaryDirectory(prefix="im-") as short:
+        folder = Path(short) / "im"
+        folder.mkdir()
+        (folder / "pixi.toml").write_text("[workspace]" + chr(10))
+        yield folder
 
 
 def build(course: Path, manifest: Path | None) -> Path:
@@ -253,8 +269,13 @@ def test_a_course_folder_on_a_network_share_is_flagged(here):
     assert "network share" in finding.title
 
 
-def test_an_unremarkable_path_says_so(here, course):
-    here.folder = course
+def test_an_unremarkable_path_says_so(here, ordinary_folder):
+    """Ordinary has to mean short too: pytest's own tmp_path is not, on Windows.
+
+    Given the real one, this asks whether a folder 90-odd characters down is
+    unremarkable, and on Windows the honest answer to that is no.
+    """
+    here.folder = ordinary_folder
     assert statuses(checks.path_checks(here)) == [OK]
 
 
@@ -427,8 +448,17 @@ def test_the_shell_this_terminal_runs_is_reported(here, monkeypatch):
 
 
 def test_a_shell_that_is_not_the_login_one_is_worth_a_line(here, monkeypatch):
+    # $SHELL is a POSIX idea, and this is the check that says so: on Windows it
+    # is left over from something else and deliberately not reported.
+    here.system = "Darwin"
     shell_is(here, monkeypatch, "bash", login="/bin/zsh")
     assert "SHELL=/bin/zsh" in written([checks.shell_finding(here)])
+
+
+def test_the_login_shell_is_not_reported_on_windows(here, monkeypatch):
+    here.system = "Windows"
+    shell_is(here, monkeypatch, "powershell", login="/bin/zsh")
+    assert checks.shell_finding(here).detail == []
 
 
 def test_each_shell_is_looked_for_in_the_files_it_actually_reads(tmp_path):
@@ -557,13 +587,20 @@ def test_powershell_refusing_to_run_scripts_is_a_warning_with_the_one_command(
 
 
 def test_a_policy_the_student_may_change_is_told_from_one_they_may_not(here, monkeypatch):
-    here.system = "Windows"
+    """A rule from Group Policy is not one Set-ExecutionPolicy can touch.
+
+    Nor `powershell -ExecutionPolicy Bypass`: MachinePolicy outranks the
+    Process scope that flag sets, so the window opens, reports the imposed
+    policy and refuses scripts just the same. What is left is the fact that
+    the rule is PowerShell's alone, and that IT can lift it.
+    """
+    here.system, here.shell = "Windows", "powershell"
     policy(monkeypatch, "AllSigned", MachinePolicy="AllSigned")
     finding = checks.scripts_finding(here)
     assert finding.status == WARN
     said = written([finding])
     assert "Set-ExecutionPolicy RemoteSigned" not in said
-    assert "-ExecutionPolicy Bypass" in said
+    assert "Command Prompt" in said
     assert "IT support" in said
 
 
@@ -1323,3 +1360,299 @@ def test_verbose_is_where_the_whole_scan_still_lives(course, monkeypatch):
     result = CliRunner().invoke(main, ["doctor", "--offline", "-v"])
     assert str(course) in result.output
     assert "Internet access" in result.output
+
+
+# --- settings in the terminal that redirect downloads ----------------------- #
+
+@pytest.fixture
+def clean_terminal(monkeypatch):
+    """A terminal with none of these set, which is the case being departed from."""
+    for name in checks.PROXY_VARIABLES + checks.CERTIFICATE_VARIABLES:
+        monkeypatch.delenv(name, raising=False)
+    for name in checks.CONDA_SET_MARKERS.values():
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("CONDA_PREFIX", raising=False)
+    return monkeypatch
+
+
+def test_a_clean_terminal_says_nothing(here, clean_terminal):
+    assert checks.proxy_check(here) is None
+
+
+def test_pixis_own_certificates_are_not_somebody_elses(here, clean_terminal, tmp_path):
+    """The openssl package points these into the environment on every run.
+
+    Left unrecognised, the one warning every student sees is the one that means
+    nothing, which is how a scan teaches people to skip its output.
+    """
+    clean_terminal.setenv("SSL_CERT_FILE", str(tmp_path / "ssl" / "cacert.pem"))
+    clean_terminal.setenv("__CONDA_OPENSSL_CERT_FILE_SET", "1")
+    assert checks.proxy_check(here) is None
+
+
+def test_certificates_inside_the_active_environment_are_pixis_too(here, clean_terminal, tmp_path):
+    """The marker is gone once a subshell is entered; the path still says whose."""
+    bundle = tmp_path / "env" / "cacert.pem"
+    bundle.parent.mkdir()
+    bundle.write_text("")
+    clean_terminal.setenv("CONDA_PREFIX", str(tmp_path / "env"))
+    clean_terminal.setenv("SSL_CERT_FILE", str(bundle))
+    assert checks.proxy_check(here) is None
+
+
+def test_a_bundle_from_elsewhere_is_named_along_with_the_way_to_clear_it(
+        here, clean_terminal, tmp_path):
+    bundle = tmp_path / "corporate.pem"
+    bundle.write_text("")
+    clean_terminal.setenv("CONDA_PREFIX", str(tmp_path / "env"))
+    clean_terminal.setenv("SSL_CERT_FILE", str(bundle))
+    finding = checks.proxy_check(here)
+    assert finding.status == WARN
+    assert "SSL_CERT_FILE" in finding.title           # which one, not "these settings"
+    assert any("SSL_CERT_FILE" in line for line in finding.fix)
+
+
+def test_a_proxy_is_named_in_the_line_a_student_reads(here, clean_terminal):
+    clean_terminal.setenv("HTTPS_PROXY", "http://proxy.example.edu:8080")
+    finding = checks.proxy_check(here)
+    assert finding.status == WARN
+    assert "HTTPS_PROXY" in finding.title
+    assert f"HTTPS_PROXY=http://proxy.example.edu:8080" in finding.detail
+
+
+def test_addresses_to_skip_are_not_a_redirection(here, clean_terminal):
+    """NO_PROXY on its own redirects nothing, so there is nothing to say."""
+    clean_terminal.setenv("NO_PROXY", "localhost,127.0.0.1")
+    assert checks.proxy_check(here) is None
+
+
+def test_a_certificate_file_that_is_not_there_is_still_a_failure(here, clean_terminal, tmp_path):
+    clean_terminal.setenv("CONDA_PREFIX", str(tmp_path / "env"))
+    clean_terminal.setenv("REQUESTS_CA_BUNDLE", str(tmp_path / "gone.pem"))
+    finding = checks.proxy_check(here)
+    assert finding.status == FAIL
+    assert any("REQUESTS_CA_BUNDLE" in line for line in finding.fix)
+
+
+def test_one_windows_variable_is_not_reported_as_two(monkeypatch, tmp_path):
+    """Windows has no case in its environment: HTTP_PROXY and http_proxy are one."""
+    windows = Context(system="Windows", cwd=tmp_path, shell="powershell")
+    for name in checks.PROXY_VARIABLES + checks.CERTIFICATE_VARIABLES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example.edu:8080")
+    monkeypatch.setenv("https_proxy", "http://proxy.example.edu:8080")
+    finding = checks.proxy_check(windows)
+    assert len([line for line in finding.fix if "Remove-Item" in line]) == 1
+
+
+# --- fixes written for the terminal they will be pasted into ---------------- #
+
+def windows(shell: str, tmp_path: Path) -> Context:
+    """A Windows context standing in a named terminal, with nothing to ask."""
+    return Context(system="Windows", cwd=tmp_path, shell=shell)
+
+
+@pytest.mark.parametrize("value, expected", [
+    (r"C:\Program Files\Git\bin\bash.exe", "bash"),   # $SHELL, as Git sets it
+    ("powershell.exe", "powershell"),
+    ("-zsh", "zsh"),                                  # a login shell names itself so
+    ("/bin/zsh", "zsh"),
+    ("PWSH.EXE", "pwsh"),
+    (None, ""),
+])
+def test_a_shell_is_recognised_however_its_name_arrives(value, expected):
+    assert checks.shell_named(value) == expected
+
+
+def test_the_program_that_ran_im_is_not_reported_as_a_shell(monkeypatch, tmp_path):
+    """`pixi run im doctor` on Windows is started by pixi, and pixi is not a terminal."""
+    monkeypatch.setattr(checks, "parent_name", lambda _: "pixi")
+    monkeypatch.delenv("SHELL", raising=False)
+    here = Context(system="Windows", cwd=tmp_path)
+    assert checks.shell_of(here) is None
+    assert checks.shell_finding(here).title == "Could not tell what this terminal is running"
+
+
+def test_an_unknown_windows_terminal_is_written_for_powershell(monkeypatch, tmp_path):
+    """It is what VS Code opens and what the course asks for: the safest guess."""
+    monkeypatch.setattr(checks, "parent_name", lambda _: "pixi")
+    monkeypatch.delenv("SHELL", raising=False)
+    assert checks.windows_dialect(Context(system="Windows", cwd=tmp_path)) == "powershell"
+
+
+@pytest.mark.parametrize("shell, expected", [
+    ("powershell", "    Remove-Item Env:HTTPS_PROXY"),
+    ("pwsh", "    Remove-Item Env:HTTPS_PROXY"),
+    ("cmd", "    set HTTPS_PROXY="),
+    ("bash", "    unset HTTPS_PROXY"),
+])
+def test_clearing_a_variable_is_said_in_the_language_of_the_terminal(shell, expected, tmp_path):
+    assert checks.unset_lines(windows(shell, tmp_path), ["HTTPS_PROXY"]) == [expected]
+
+
+@pytest.mark.parametrize("shell, verb", [
+    ("powershell", "move"), ("cmd", "move"), ("pwsh", "move"), ("bash", "mv"),
+])
+def test_moving_a_folder_is_said_in_the_language_of_the_terminal(shell, verb, tmp_path):
+    """Git Bash has no `move`, and Command Prompt has no `mv`."""
+    said = checks.move_command(windows(shell, tmp_path), Path(r"C:\a"), r"C:\b")
+    assert said == verb + r' "C:\a" "C:\b"'
+
+
+def test_a_mac_is_always_told_mv(tmp_path):
+    here = Context(system="Darwin", cwd=tmp_path, shell="zsh")
+    assert checks.move_command(here, Path("/a"), "/b").startswith("mv ")
+
+
+def restricted(monkeypatch, scopes=None):
+    """PowerShell refusing to run scripts at all, which is how Windows ships."""
+    scopes = scopes or dict(MachinePolicy="Undefined", UserPolicy="Undefined",
+                            Process="Undefined", CurrentUser="Undefined",
+                            LocalMachine="Undefined")
+    answer = "\n".join(["Restricted", *(f"{k}={v}" for k, v in scopes.items())])
+    monkeypatch.setattr(checks.security, "powershell", lambda *a, **k: answer)
+
+
+def test_the_policy_fix_is_pasteable_in_powershell(monkeypatch, tmp_path):
+    restricted(monkeypatch)
+    finding = checks.scripts_finding(windows("powershell", tmp_path))
+    assert finding.title == "PowerShell is not allowed to run scripts"
+    assert "    Set-ExecutionPolicy RemoteSigned -Scope CurrentUser" in finding.fix
+
+
+@pytest.mark.parametrize("shell, named", [("cmd", "Command Prompt"), ("bash", "Git Bash")])
+def test_the_policy_fix_is_handed_to_powershell_from_anywhere_else(
+        shell, named, monkeypatch, tmp_path):
+    """`Set-ExecutionPolicy` typed into Command Prompt answers "not recognized".
+
+    Which, to a student who has just been told that this is the fix, reads as
+    the fix being wrong rather than as being typed in the wrong window.
+    """
+    restricted(monkeypatch)
+    finding = checks.scripts_finding(windows(shell, tmp_path))
+    assert named in " ".join(finding.fix)
+    assert ('    powershell -NoProfile -Command "Set-ExecutionPolicy RemoteSigned '
+            '-Scope CurrentUser"') in finding.fix
+    assert "    Set-ExecutionPolicy RemoteSigned -Scope CurrentUser" not in finding.fix
+
+
+def imposed(monkeypatch, scope="MachinePolicy"):
+    """A policy set by Group Policy, which is the one nothing typed can undo."""
+    scopes = dict(MachinePolicy="Undefined", UserPolicy="Undefined",
+                  Process="Undefined", CurrentUser="Undefined",
+                  LocalMachine="Undefined")
+    scopes[scope] = "Restricted"
+    restricted(monkeypatch, scopes)
+
+
+@pytest.mark.parametrize("scope", ["MachinePolicy", "UserPolicy"])
+def test_a_policy_the_machine_imposes_offers_no_command_that_cannot_work(
+        scope, monkeypatch, tmp_path):
+    """Neither of the two obvious commands gets round Group Policy.
+
+    MachinePolicy and UserPolicy sit above every other scope: Set-ExecutionPolicy
+    is refused outright, and `powershell -ExecutionPolicy Bypass` is accepted and
+    then overruled — the window opens, reports the imposed policy, and refuses
+    scripts exactly as before. Offering either costs a student on a locked-down
+    laptop the one thing they were going to try.
+    """
+    imposed(monkeypatch, scope)
+    for shell in ("powershell", "cmd", "bash"):
+        said = " ".join(checks.scripts_finding(windows(shell, tmp_path)).fix)
+        assert "Set-ExecutionPolicy" not in said
+        assert "-ExecutionPolicy Bypass" not in said
+
+
+def test_a_policy_the_machine_imposes_sends_a_powershell_user_to_command_prompt(
+        monkeypatch, tmp_path):
+    """The rule is PowerShell's own and binds nothing else, which is the way out."""
+    imposed(monkeypatch)
+    finding = checks.scripts_finding(windows("powershell", tmp_path))
+    assert "    cmd" in finding.fix
+    assert "Command Prompt" in " ".join(finding.fix)
+
+
+def test_a_student_already_out_of_powershell_is_not_sent_anywhere(monkeypatch, tmp_path):
+    """Telling somebody in Git Bash to open Git Bash is not advice.
+
+    What is still worth saying is that VS Code's terminal is a PowerShell and
+    will go on failing until its default profile is changed.
+    """
+    imposed(monkeypatch)
+    said = " ".join(checks.scripts_finding(windows("bash", tmp_path)).fix)
+    assert "Git Bash" in said and "VS Code" in said
+    assert "    cmd" not in checks.scripts_finding(windows("bash", tmp_path)).fix
+
+
+# --- a terminal that cannot print what the answer is written in ------------- #
+
+class Narrow:
+    """A stream on a code page with neither a tick nor an em dash in it.
+
+    Which is what Windows hands Python when the output is redirected to a file:
+    the machine's own code page rather than whatever the terminal was showing.
+    """
+
+    encoding = "cp437"
+
+    def __init__(self):
+        self.lines = []
+
+    def write(self, text):
+        text.encode(self.encoding)          # what click.echo would do, and it raises
+        self.lines.append(text)
+
+
+def test_a_narrow_terminal_gets_letters_it_can_print():
+    assert doctor.marks(Narrow()) == {OK: "+", WARN: "!", FAIL: "x"}
+    assert doctor.marks() [OK] in ("+", "✓")
+
+
+def test_the_punctuation_goes_too_not_only_the_ticks():
+    """The em dash is in cp1252 and not in cp437, and click.echo raises on it.
+
+    It raises in the middle of printing the answer, so the line a student
+    needed is the one that does not arrive.
+    """
+    said = doctor.sayable("a university guide — or another course — often does",
+                          plain=True)
+    assert said == "a university guide -- or another course -- often does"
+    said.encode("cp437")                    # the point of the exercise
+
+
+def test_nothing_is_taken_out_of_a_terminal_that_can_print_it():
+    line = "a university guide — often does"
+    assert doctor.sayable(line, plain=False) == line
+
+
+def test_the_whole_answer_survives_a_narrow_terminal(tmp_path, monkeypatch):
+    """End to end, through a stream that raises on the em dash the answer uses.
+
+    The course folder is put inside a OneDrive, because that is a finding whose
+    explanation is written with one, and --verbose because that is where an
+    explanation reaches the screen. Without the guard this raises part-way
+    through printing, and what is lost is the rest of the answer.
+    """
+    folder = tmp_path / "OneDrive" / "instructing-machines"
+    folder.mkdir(parents=True)
+    (folder / "pixi.toml").write_text("[workspace]" + chr(10))
+    monkeypatch.setenv("IM_COURSE_FOLDER", str(folder))
+    monkeypatch.setattr(checks.security, "survey", lambda _: Survey(products=[]))
+    monkeypatch.setattr(checks, "run_briefly", lambda *a, **k: None)
+    narrow = Narrow()
+    doctor.diagnose(narrow.write, offline=True, stream=narrow, verbose=True)
+    printed = "".join(narrow.lines)
+    assert "OneDrive" in printed                    # the finding really did fire
+    assert "--" in printed and "—" not in printed
+
+
+def test_a_windows_bash_is_called_what_a_student_sees_on_the_window(here, monkeypatch):
+    here.system = "Windows"
+    shell_is(here, monkeypatch, "bash")
+    assert checks.shell_finding(here).title == "Git Bash"
+
+
+def test_a_mac_bash_is_just_bash(here, monkeypatch):
+    here.system = "Darwin"
+    shell_is(here, monkeypatch, "bash")
+    assert checks.shell_finding(here).title == "bash"
