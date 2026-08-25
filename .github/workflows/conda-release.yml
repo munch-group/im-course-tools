@@ -57,7 +57,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [macOS-latest, ubuntu-latest] #, macos-13, windows-latest]
+        # The recipe is noarch: python, so every runner builds the same
+        # noarch/*.conda file and uploads it to the same path. One runner is
+        # enough; add platforms back only if the recipe stops being noarch.
+        os: [ubuntu-latest] #, macOS-latest, macos-13, windows-latest]
         # # ==============================================================================
         # # Uncomment to produce multi-platform builds:
         # python-version: ["3.10", "3.11", "3.12", "3.13"] 
