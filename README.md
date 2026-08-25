@@ -148,8 +148,19 @@ cache that is thrown away again. It looks at, in this order:
   terminal, and a clock wrong enough to make valid certificates look expired.
 - **VS Code** — installed, with the Python and Jupyter extensions.
 
-What reaches the screen is only what can be acted on: for each thing that is
-wrong, the one line naming it and the commands to paste, failures before
+It answers one step of a staircase at a time. A student who is not in their
+course folder is told to `cd` there and run it again, and nothing else is
+looked at — every check after that one has nothing to look at anyway. A
+student who is in the folder but has not activated the environment is told to
+do that, and if anything else is wrong they are told to come back afterwards
+rather than handed a list they cannot act on from where they stand. Only from
+inside the folder, inside the environment, does the full list appear. The
+exception is pixi itself and the terminal: if either of those is what is
+wrong, `pixi shell` is not a step anybody can climb, so those are said
+straight out.
+
+What reaches the screen is then only what can be acted on: for each thing that
+is wrong, the one line naming it and the commands to paste, failures before
 warnings, with a blank line around each. Nothing else — not the reasoning, not
 what it was read off, not the forty things that were fine. A student running
 `im doctor` is stuck, and every line they have to read past is a line hiding

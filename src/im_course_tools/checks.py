@@ -179,6 +179,19 @@ class Finding:
     detail: list[str] = field(default_factory=list)
     advice: list[str] = field(default_factory=list)
     fix: list[str] = field(default_factory=list)
+    # Whether there is any point looking at the rest. Set by the one finding
+    # that makes every check after it meaningless: a student who is not in
+    # their course folder has nothing there for those checks to look at, and
+    # handing them a page about an environment they are standing outside of
+    # buries the one line that gets them back to it.
+    stop: bool = False
+    # What to say when this is the only thing wrong. Having one at all marks a
+    # finding as something to be dealt with before the rest of the list means
+    # anything: the screen then holds this and nothing else, `fix` when there
+    # is a queue behind it and `alone` when there is not. There is a queue
+    # behind it more often than not, and "here is one thing to do" is a
+    # different message from "here is the first of five".
+    alone: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -887,24 +900,29 @@ def folder_check(ctx: Context) -> Finding:
     advice = [
         f"Nothing here, and nothing in any folder above it, has a {MARKER} in it.",
         "`im get` and `im update` have nowhere to put anything from here, and",
-        "most of the checks below have nothing to look at.",
+        "none of the checks after this one have anything to look at, which is",
+        "why they were not run.",
         "",
     ]
+    # Where it probably is, since "where is it, then" is the next question. One
+    # guess and not four: a list to choose from is a decision to make, and a
+    # student who is lost enough to be here has had enough of those.
     guesses = search_briefly()
+    short = ["Please navigate to your instructing-machines folder using the cd",
+             "command, and run `im doctor` again once you are there."]
     if guesses:
         advice.append("Your course folder looks like it is one of these. Change into")
         advice.append("it and run `im doctor` again:")
         advice.append("")
         advice.extend(f'    cd "{guess}"' for guess in guesses)
-        short = ["Change into it and run this again:", ""] + \
-            [f'    cd "{guess}"' for guess in guesses] + ["    im doctor"]
+        short = ["Please navigate to your instructing-machines folder, and run",
+                 "`im doctor` again once you are there:",
+                 "", f'    cd "{guesses[0]}"', "    im doctor"]
     else:
         advice.append("Open your course folder in VS Code and use the terminal there")
         advice.append("(Terminal -> New Terminal). It always starts in the right place.")
-        short = ["Open your course folder in VS Code (File -> Open Folder), then",
-                 "Terminal -> New Terminal, and run `im doctor` there."]
     return Finding(FAIL, FOLDER, "You are not in your course folder",
-                   [f"You are in {ctx.cwd}"], advice, fix=short)
+                   [f"You are in {ctx.cwd}"], advice, fix=short, stop=True)
 
 
 def nested_finding(ctx: Context, inside: Path) -> Finding:
@@ -947,9 +965,11 @@ def nested_finding(ctx: Context, inside: Path) -> Finding:
             "where the outer one is, and delete the empty one left behind.",
         ]
     return Finding(FAIL, FOLDER, "Your course folder is the one inside this one",
-                   detail, advice, fix=["Change into it and run this again:", "",
-                                        f'    cd "{inside}"',
-                                        "    im doctor"])
+                   detail, advice, stop=True,
+                   fix=["Please navigate to your instructing-machines folder, and run",
+                        "`im doctor` again once you are there:", "",
+                        f'    cd "{inside}"',
+                        "    im doctor"])
 
 
 def cloud_finding(ctx: Context, path: Path) -> Finding | None:
@@ -1515,7 +1535,13 @@ def interpreter_check(ctx: Context) -> Finding | None:
         inside = False
     if inside:
         return Finding(OK, ENVIRONMENT, "`im` is running from inside the course environment")
-    return Finding(WARN, ENVIRONMENT, "`im` is running from outside the course environment",
+    # Not a warning. It opens by saying that nothing is wrong, which is the
+    # mark of something that should not be interrupting anybody: a globally
+    # installed `im` is what the course recommends, and this fires for every
+    # student who took that advice. What it has to say is worth keeping and
+    # not worth a line on a stuck student's screen, so --verbose and the
+    # report keep it and the screen does not.
+    return Finding(OK, ENVIRONMENT, "`im` is running from outside the course environment",
                    [f"This `im` runs on {sys.executable}", f"The environment is {env}"], [
                        "That is fine for `im doctor`, which looks at your course",
                        "environment directly rather than from inside it. It is not fine",
@@ -1585,10 +1611,15 @@ def activation_check(ctx: Context) -> Finding | None:
             "",
             "Notebooks in VS Code do not go through this: they pick their kernel",
             "themselves, in the picker at the top right.",
-        ], fix=["`python` and `pytest` here are the machine's, not the course's.",
-               "From your course folder:",
-               "",
-               "    pixi shell"])
+        ], fix=["The course environment is not active in this terminal. Activate",
+                "it, and run `im doctor` again once you have:",
+                "",
+                "    pixi shell",
+                "    im doctor"],
+           alone=["Everything looks fine, but the course environment is not active",
+                  "in this terminal. Activate it:",
+                  "",
+                  "    pixi shell"])
 
     if root and ctx.folder is not None and same_folder(Path(root), ctx.folder):
         named = os.environ.get("PIXI_ENVIRONMENT_NAME") or "another"

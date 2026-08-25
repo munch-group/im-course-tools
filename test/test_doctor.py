@@ -366,10 +366,11 @@ def test_an_environment_that_will_not_answer_warns(here, course, monkeypatch):
     assert checks.packages_check(here).status == WARN
 
 
-def test_a_globally_installed_im_says_so(here, course):
+def test_a_globally_installed_im_says_so_without_interrupting_anybody(here, course):
+    """It is what the course recommends, so it is not a thing to go and do."""
     here.folder, here.env_python = course, course / "python"
     finding = checks.interpreter_check(here)
-    assert finding.status == WARN
+    assert finding.status == OK
     assert "pixi --quiet run im check" in written([finding])
 
 
@@ -1134,6 +1135,77 @@ def test_every_block_has_a_blank_line_on_each_side_and_never_two():
             assert lines[number + 1] == "", f"no blank line after {line!r}"
 
 
+# --- one step of the staircase at a time ------------------------------------ #
+
+def not_activated(**extra):
+    """The environment, installed and standing unused."""
+    return checks.Finding(WARN, checks.ENVIRONMENT,
+                          "The course environment is not active in this terminal",
+                          fix=["Activate it, and run `im doctor` again once you have:",
+                               "", "    pixi shell", "    im doctor"],
+                          alone=["Everything looks fine, but the course environment is",
+                                 "not active. Activate it:", "", "    pixi shell"],
+                          **extra)
+
+
+def test_an_unused_environment_on_a_machine_where_all_else_is_fine():
+    lines = []
+    code = doctor.diagnose(lines.append, checks=quiet(
+        checks.Finding(OK, checks.MACHINE, "macOS"), not_activated()))
+    printed = "\n".join(lines)
+    assert code == 0
+    assert "Everything looks fine" in printed
+    assert "    pixi shell" in printed
+    assert "im doctor" not in printed        # there is nothing to come back for
+
+
+def test_an_unused_environment_comes_before_whatever_else_is_wrong():
+    """No use handing somebody the fourth step while they stand on the second."""
+    lines = []
+    doctor.diagnose(lines.append, checks=quiet(
+        not_activated(),
+        checks.Finding(FAIL, checks.INTERNET, "a blocked host", fix=["    do this"])))
+    printed = "\n".join(lines)
+    assert "Activate it, and run `im doctor` again" in printed
+    assert "a blocked host" not in printed   # it waits for the next run
+    assert "Everything looks fine" not in printed
+
+
+def test_the_thing_that_is_wrong_wins_when_activating_could_not_work():
+    """`pixi shell` is not a step a student can climb without pixi."""
+    lines = []
+    doctor.diagnose(lines.append, checks=quiet(
+        not_activated(),
+        checks.Finding(FAIL, checks.PIXI, "pixi is not installed",
+                       fix=["    install pixi"])))
+    printed = "\n".join(lines)
+    assert "pixi is not installed" in printed
+    assert "    install pixi" in printed
+    assert "Everything looks fine" not in printed
+
+
+def test_a_terminal_that_cannot_run_scripts_wins_for_the_same_reason():
+    lines = []
+    doctor.diagnose(lines.append, checks=quiet(
+        not_activated(),
+        checks.Finding(WARN, checks.SHELL, "PowerShell is not allowed to run scripts",
+                       fix=["    Set-ExecutionPolicy RemoteSigned -Scope CurrentUser"])))
+    assert "Set-ExecutionPolicy" in "\n".join(lines)
+
+
+def test_being_outside_the_folder_ends_the_command_there():
+    """Nothing after it was looked at, so nothing after it is said."""
+    looked = []
+    lines = []
+    doctor.diagnose(lines.append, checks=[
+        lambda ctx: checks.Finding(FAIL, checks.FOLDER, "not in it",
+                                   fix=["Please navigate to it."], stop=True),
+        lambda ctx: looked.append(1) or checks.Finding(OK, checks.PIXI, "pixi"),
+    ])
+    assert looked == []                      # the rest of the checks never ran
+    assert "\n".join(lines).strip() == "Please navigate to it."
+
+
 def test_the_reasoning_is_kept_for_whoever_wants_it(tmp_path, monkeypatch):
     """It is moved out of the student's way, not thrown away."""
     monkeypatch.setenv("IM_COURSE_FOLDER", str(tmp_path))
@@ -1230,8 +1302,9 @@ def test_the_command_runs_from_outside_a_course_folder(tmp_path, monkeypatch):
     monkeypatch.setattr(checks, "run_briefly", lambda *a, **k: None)
     result = CliRunner().invoke(main, ["doctor", "--offline"])
     assert result.exit_code == 1                      # no course folder is a failure
-    assert "You are not in your course folder" in result.output
-    assert "File -> Open Folder" in result.output
+    assert result.output.strip() == (
+        "Please navigate to your instructing-machines folder using the cd\n"
+        "command, and run `im doctor` again once you are there.")
 
 
 def test_the_command_runs_inside_one(course, monkeypatch):

@@ -29,7 +29,8 @@ import platform
 import sys
 from pathlib import Path
 
-from .checks import CHECKS, FAIL, MACHINE, OK, WARN, Context, Finding
+from .checks import (CHECKS, FAIL, MACHINE, OK, PIXI, SHELL, WARN, Context,
+                     Finding)
 
 REPORT_NAME = "im-doctor-report.txt"
 
@@ -128,6 +129,23 @@ def padded(lines: list[str]) -> list[str]:
     return ["", *kept, ""] if kept else []
 
 
+def first_thing(wrong: list[Finding]) -> Finding | None:
+    """The one thing to do before the rest of the list is worth reading.
+
+    An environment that has not been activated is the second step of a
+    staircase whose first step is being in the course folder at all, and there
+    is no use handing somebody the fourth step while they are standing on the
+    second. So the rest waits for the next run.
+
+    Unless what is wrong is pixi itself or the terminal it is typed into, in
+    which case `pixi shell` is not going to work either and saying so first
+    would leave a student trying to climb a step that is not there.
+    """
+    if any(finding.group in (PIXI, SHELL) for finding in wrong):
+        return None
+    return next((finding for finding in wrong if finding.alone), None)
+
+
 def render_fixes(findings: list[Finding], mark: dict[str, str]) -> list[str]:
     """Every thing that is wrong, as the line naming it and the way out of it.
 
@@ -199,10 +217,24 @@ def diagnose(echo, *, offline: bool = False, report: bool = False,
                       offline=offline)
     mark = marks(stream)
 
-    echo("")
-    echo("Looking at your setup. The internet checks take a few seconds.")
-
-    findings = list(findings_for(context, checks))
+    # Stopped rather than finished, when a check says nothing after it can
+    # mean anything. The one that does is being outside the course folder.
+    #
+    # Which is also why the line about waiting is not said until the course
+    # folder has been found: said before, it would be the first half of a
+    # two-line answer whose second half is "you are in the wrong folder", and
+    # a promise of internet checks that are never going to run.
+    findings: list[Finding] = []
+    announced = False
+    for finding in findings_for(context, checks):
+        findings.append(finding)
+        if finding.stop:
+            break
+        if not announced and context.folder is not None:
+            announced = True
+            echo("")
+            echo("Looking at your setup. The internet checks take a few seconds.")
+    stopped = bool(findings) and findings[-1].stop
     wrong = trouble_first(findings)
 
     # Built up whole and padded once, so that every block has a blank line on
@@ -212,12 +244,19 @@ def diagnose(echo, *, offline: bool = False, report: bool = False,
         said += render(findings, mark)
         said += [""]
         said += render_advice(findings) if wrong else ["Nothing looked wrong."]
+    elif stopped:
+        # One sentence and nothing else. Everything this student could act on
+        # is in the folder they are being sent to.
+        said += findings[-1].fix or [findings[-1].title]
+    elif wrong and first_thing(wrong) is not None:
+        gate = first_thing(wrong)
+        said += gate.fix if [f for f in wrong if f is not gate] else gate.alone
     elif wrong:
         said += render_fixes(findings, mark)
     else:
         said += ["Nothing here looks wrong."]
 
-    if not report:
+    if not report and not stopped and first_thing(wrong) is None:
         opening = ("If that does not fix it, run this and send the file it writes"
                    if wrong else
                    "If something still does not work, run this and send the file")
