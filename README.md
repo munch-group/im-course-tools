@@ -111,7 +111,10 @@ cache that is thrown away again. It looks at, in this order:
   there this once, and on Windows whether PowerShell is allowed to run a script
   at all — it ships refusing to, and says so in a sentence that mentions neither
   pixi nor the course, while `pixi shell` and VS Code's own terminal activation
-  are both scripts.
+  are both scripts. That last one is asked of this window and of the next one
+  separately: a window started with `-ExecutionPolicy Bypass` runs everything
+  until it is closed, so reading only what is in force here would call a
+  machine fixed on the strength of a setting that dies with the terminal.
 - **The environment** — built or not, its lock file current, whether it was
   built for the folder it is now sitting in, because a pixi environment holds
   that folder's path in hundreds of places and a moved or renamed course folder
@@ -145,19 +148,26 @@ cache that is thrown away again. It looks at, in this order:
   terminal, and a clock wrong enough to make valid certificates look expired.
 - **VS Code** — installed, with the Python and Jupyter extensions.
 
-Every problem is printed twice: once as a line in the scan, and once at the
-bottom with the command or click-path that fixes it, written out in full,
-because a student reading it is by definition having trouble reaching the
-website. What was looked at and found fine is counted rather than listed, so
-that the thing which is wrong is not hidden among forty ticks; `--verbose`
-lists it, and the file written by `--report` holds it either way.
+What reaches the screen is only what can be acted on: for each thing that is
+wrong, the one line naming it and the commands to paste, failures before
+warnings, with a blank line around each. Nothing else — not the reasoning, not
+what it was read off, not the forty things that were fine. A student running
+`im doctor` is stuck, and every line they have to read past is a line hiding
+the command underneath it, which is how a paragraph explaining a fix ends up
+preventing one.
+
+The explanations are not gone, they are moved. `--verbose` prints the whole
+scan with the reasoning in full, and so does the file `--report` writes, where
+the reader is an instructor with the time to spend and brevity is the wrong
+goal. Every finding carries both, and one that was never given the short form
+falls back to the long one rather than saying nothing.
 
 ```bash
 im doctor                # the whole thing
 im doctor -v             # also show what was looked at and was fine
 im doctor --offline      # skip the network checks
 im doctor --report       # also write im-doctor-report.txt to send to an instructor
-im doctor --no-upgrade   # do not offer to upgrade `im` itself first
+im doctor --no-upgrade   # do not upgrade `im` itself first
 ```
 
 Warnings do not set the exit code; only failures do.
@@ -184,16 +194,45 @@ around it, or the absence of both. That same answer decides what is offered:
 | a checkout | nothing — the code being run is not the code installed |
 
 Every command prints one line when there is something newer, after its own
-output rather than before it. `im update` upgrades `im` first, since it is the
-command for putting the environment right and `im` is part of the environment.
-`im doctor` asks before doing it, because it otherwise changes nothing.
+output rather than before it. `im update` and `im doctor` go further and
+upgrade `im` before doing anything else, since both are commands for putting a
+broken setup right and a stale `im` is one of the things that can be broken.
 
-Neither of them re-runs the command afterwards. `im` cannot replace the files it
-is running out of while it is running out of them — on Windows it plainly
-cannot — so what follows an upgrade is the command typed back out, to be run
-again. An upgrade that finishes cleanly is also checked to have actually changed
-the version, read fresh off disk: one that runs, succeeds and changes nothing
-would otherwise send a student round the same loop indefinitely.
+Neither asks first. The question is one a student cannot answer — they do not
+know what is in the newer one, and they are running the command because
+something is already wrong — and a fix that a hundred people decline is a fix
+that did not happen. So it upgrades, and then **runs what was actually typed**,
+as a process of its own:
+
+```
+There is a newer im: 0.1.12 -> 0.1.13
+This one is the conda package in your course environment.
+
+Upgrading im from 0.1.12. This may take a minute.
+...
+Running `im doctor --report` again on the new one.
+```
+
+A second process is what makes that possible at all: `im` cannot swap itself
+out from under itself, because the modules it is running are already loaded and
+on Windows the files are held open besides. The child gets the version just
+installed, and this one exits with whatever the child says — so a student types
+one command and gets one command's worth of output, and never has to know the
+tool stopped to fix itself in the middle.
+
+Which copy the child is is decided rather than guessed. Inside a course
+environment it is reached the way everything else in that folder is, with
+`pixi --quiet run im …` in the folder; anywhere else it is the console script
+sitting beside the interpreter that was just upgraded, and failing that the
+same interpreter asked by name with `-m im_course_tools`. Never plain `im`,
+which on a machine carrying two of them picks the wrong one as often as not.
+The child is also told not to check for updates, so nothing can send it round
+the loop twice.
+
+An upgrade that finishes cleanly is checked to have actually changed the
+version, read fresh off disk, before any of that happens: one that runs,
+succeeds and changes nothing would otherwise send a student round the same loop
+indefinitely. `--no-upgrade` on either command skips the whole thing.
 
 Set `IM_NO_UPDATE_CHECK=1` to switch the whole thing off.
 

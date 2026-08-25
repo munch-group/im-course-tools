@@ -1,13 +1,21 @@
 """Running every check, and laying the answers out for someone who is stuck.
 
-The scan prints as it happens, so the command visibly does something while it
-waits on the network, and it prints only what is wrong: a student running this
-is stuck, and forty ticks scrolling past is forty lines of hiding the one that
-matters. --verbose shows everything that was looked at, and the file written by
---report holds it whether or not anyone asked. What to do about any of it comes
-afterwards, in full, numbered, and only for what was actually wrong. The scan is
-for reading quickly and the list underneath is for acting on, and running them
-together makes both harder to use.
+What reaches the screen is what can be acted on: for each thing that is wrong,
+the one line naming it and the commands to paste, failures before warnings,
+each with a blank line around it. Nothing else. A student running this is
+stuck, and every line they have to read past is a line hiding the command
+underneath it — which is how a paragraph explaining a fix ends up preventing
+one.
+
+The explanations are not thrown away; they are moved. `--verbose` prints
+everything that was looked at, with the reasoning in full, and the file
+`--report` writes holds it whether or not anyone asked. The reader there is an
+instructor with the time to spend, and what they need is the opposite of brief.
+
+Nothing prints while the checks run, so the one line up front says the internet
+checks take a few seconds: printing findings as they arrive means printing each
+one twice, once where it was found and once where it can be acted on, and
+twice is what this command is trying to stop doing.
 
 Only failures set the exit code. A course folder inside OneDrive is worth a
 paragraph and is not worth telling a student their setup is broken over.
@@ -75,7 +83,9 @@ def findings_for(context: Context, checks=CHECKS):
             yield Finding(WARN, group, f"The {name} check could not be run",
                           [f"{type(error).__name__}: {error}"],
                           ["This is a fault in `im doctor` itself, not in your setup.",
-                           "Please show this line to your instructor."])
+                           "Please show this line to your instructor."],
+                          fix=["This is a fault in `im doctor` itself, not in your setup.",
+                               f"Show this to your instructor: {type(error).__name__}: {error}"])
             continue
         if produced is None:
             continue
@@ -102,6 +112,32 @@ def render(findings: list[Finding], mark: dict[str, str]) -> list[str]:
             lines.append(group)
         lines.append(f"  {mark[finding.status]} {finding.title}")
         lines.extend(f"      {detail}" for detail in finding.detail)
+    return lines
+
+
+def padded(lines: list[str]) -> list[str]:
+    """The same lines with one blank around each block, and never two."""
+    kept: list[str] = []
+    for line in lines:
+        blank = not line.strip()
+        if blank and (not kept or not kept[-1]):
+            continue
+        kept.append("" if blank else line)
+    while kept and not kept[-1]:
+        kept.pop()
+    return ["", *kept, ""] if kept else []
+
+
+def render_fixes(findings: list[Finding], mark: dict[str, str]) -> list[str]:
+    """Every thing that is wrong, as the line naming it and the way out of it.
+
+    A finding that was never given a short answer falls back to its long one,
+    which is worse to read and better than silence.
+    """
+    lines: list[str] = []
+    for finding in trouble_first(findings):
+        lines += ["", f"{mark[finding.status]} {finding.title}", ""]
+        lines += finding.fix or finding.advice or ["    Bring this line to class."]
     return lines
 
 
@@ -163,54 +199,46 @@ def diagnose(echo, *, offline: bool = False, report: bool = False,
                       offline=offline)
     mark = marks(stream)
 
+    echo("")
     echo("Looking at your setup. The internet checks take a few seconds.")
-    echo("")
 
-    findings: list[Finding] = []
-    group = None
-    fine = 0
-    for finding in findings_for(context, checks):
-        findings.append(finding)
-        if finding.status == OK and not verbose:
-            fine += 1
-            continue
-        if finding.group != group:
-            if group is not None:
-                echo("")
-            group = finding.group
-            echo(group)
-        echo(f"  {mark[finding.status]} {finding.title}")
-        for detail in finding.detail:
-            echo(f"      {detail}")
+    findings = list(findings_for(context, checks))
+    wrong = trouble_first(findings)
 
-    if fine:
-        if group is not None:
-            echo("")
-        echo(f"{fine} {'other ' if group is not None else ''}"
-             f"{'things were' if fine > 1 else 'thing was'} looked at and found fine.")
-        echo("Run `im doctor --verbose` to see them.")
-
-    echo("")
-    if trouble_first(findings):
-        echo("")
-        for line in render_advice(findings):
-            echo(line)
+    # Built up whole and padded once, so that every block has a blank line on
+    # each side and nowhere has two, however the pieces below were assembled.
+    said: list[str] = []
+    if verbose:
+        said += render(findings, mark)
+        said += [""]
+        said += render_advice(findings) if wrong else ["Nothing looked wrong."]
+    elif wrong:
+        said += render_fixes(findings, mark)
     else:
-        echo("Nothing here looks wrong.")
-        echo("")
-        echo("If something still does not work, run `im doctor --report` and send")
-        echo("the file it writes to your instructor.")
-        echo("")
+        said += ["Nothing here looks wrong."]
+
+    if not report:
+        opening = ("If that does not fix it, run this and send the file it writes"
+                   if wrong else
+                   "If something still does not work, run this and send the file")
+        said += ["", opening,
+                 "to your instructor:" if wrong else "it writes to your instructor:",
+                 "",
+                 "    im doctor --report"]
 
     if report:
         target = (context.folder or context.cwd) / REPORT_NAME
         try:
             target.write_text(render_report(findings, context, version), encoding="utf-8")
         except OSError as error:
-            echo(f"Could not write the report: {error}")
+            said += ["", f"Could not write the report: {error}"]
+            for line in padded(said):
+                echo(line)
             return 1
-        echo(f"Written to {target}")
-        echo("Send that file to your instructor. It holds no passwords.")
-        echo("")
+        said += ["", f"Written to {target}", "",
+                 "Send that file to your instructor. It holds no passwords."]
+
+    for line in padded(said):
+        echo(line)
 
     return 1 if any(finding.status == FAIL for finding in findings) else 0

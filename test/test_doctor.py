@@ -370,7 +370,7 @@ def test_a_globally_installed_im_says_so(here, course):
     here.folder, here.env_python = course, course / "python"
     finding = checks.interpreter_check(here)
     assert finding.status == WARN
-    assert "pixi run im check" in written([finding])
+    assert "pixi --quiet run im check" in written([finding])
 
 
 # --- the terminal the student is typing into -------------------------------- #
@@ -532,18 +532,22 @@ def test_the_startup_file_is_not_windows_business(here, monkeypatch, tmp_path):
 
 # --- what powershell is allowed to run -------------------------------------- #
 
-LISTED = ("MachinePolicy=Undefined\nUserPolicy=Undefined\nProcess=Undefined\n"
-          "CurrentUser={}\nLocalMachine=Undefined\n")
+def listing(**scopes) -> str:
+    """`Get-ExecutionPolicy -List`, with every scope not named left Undefined."""
+    return "".join(f"{scope}={scopes.get(scope, 'Undefined')}\n"
+                   for scope in checks.POLICY_SCOPES)
 
 
-def policy(monkeypatch, said):
+def policy(monkeypatch, effective, **scopes):
+    """A machine whose PowerShell answers exactly this."""
+    said = None if effective is None else f"{effective}\n" + listing(**scopes)
     monkeypatch.setattr(checks.security, "powershell", lambda *a, **k: said)
 
 
 def test_powershell_refusing_to_run_scripts_is_a_warning_with_the_one_command(
         here, monkeypatch):
     here.system = "Windows"
-    policy(monkeypatch, "Restricted\n" + LISTED.format("Undefined"))
+    policy(monkeypatch, "Restricted")
     finding = checks.scripts_finding(here)
     assert finding.status == WARN
     said = written([finding])
@@ -553,8 +557,7 @@ def test_powershell_refusing_to_run_scripts_is_a_warning_with_the_one_command(
 
 def test_a_policy_the_student_may_change_is_told_from_one_they_may_not(here, monkeypatch):
     here.system = "Windows"
-    policy(monkeypatch, "AllSigned\nMachinePolicy=AllSigned\nUserPolicy=Undefined\n"
-                        "Process=Undefined\nCurrentUser=Undefined\nLocalMachine=Undefined\n")
+    policy(monkeypatch, "AllSigned", MachinePolicy="AllSigned")
     finding = checks.scripts_finding(here)
     assert finding.status == WARN
     said = written([finding])
@@ -565,7 +568,7 @@ def test_a_policy_the_student_may_change_is_told_from_one_they_may_not(here, mon
 
 def test_a_policy_that_allows_scripts_is_fine(here, monkeypatch):
     here.system = "Windows"
-    policy(monkeypatch, "RemoteSigned\n" + LISTED.format("RemoteSigned"))
+    policy(monkeypatch, "RemoteSigned", CurrentUser="RemoteSigned")
     finding = checks.scripts_finding(here)
     assert finding.status == OK
     assert "set for CurrentUser" in written([finding])
@@ -579,8 +582,62 @@ def test_windows_refusing_to_say_is_not_read_as_a_refusal_to_run(here, monkeypat
 
 def test_a_mac_is_not_asked_about_powershell(here, monkeypatch):
     here.system = "Darwin"
-    policy(monkeypatch, "Restricted\n" + LISTED.format("Undefined"))
+    policy(monkeypatch, "Restricted")
     assert checks.scripts_finding(here) is None
+
+
+# A window started with `powershell -ExecutionPolicy Bypass` runs everything
+# until it is closed, which is exactly the state the advice above leaves a
+# student in. Reading only what is in force here would call that fixed.
+
+def test_a_window_started_with_the_rule_set_aside_is_not_an_all_clear(here, monkeypatch):
+    here.system = "Windows"
+    policy(monkeypatch, "Bypass", Process="Bypass", LocalMachine="Restricted")
+    finding = checks.scripts_finding(here)
+    assert finding.status == WARN
+    said = written([finding])
+    assert "next window" in finding.title
+    assert "This window is enforcing Bypass, set for Process" in said
+    assert "A new window would enforce Restricted, set for LocalMachine" in said
+    assert "Set-ExecutionPolicy RemoteSigned -Scope CurrentUser" in said
+
+
+def test_a_bypass_window_over_a_machine_with_nothing_set_still_warns(here, monkeypatch):
+    """Nothing outside the window is set, so what is left is Windows' default."""
+    here.system = "Windows"
+    policy(monkeypatch, "Bypass", Process="Bypass")
+    finding = checks.scripts_finding(here)
+    assert finding.status == WARN
+    assert "A new window would enforce Restricted" in written([finding])
+
+
+def test_a_bypass_window_under_a_rule_it_cannot_change_says_so(here, monkeypatch):
+    here.system = "Windows"
+    policy(monkeypatch, "Bypass", Process="Bypass", MachinePolicy="AllSigned")
+    said = written([checks.scripts_finding(here)])
+    assert "Set-ExecutionPolicy RemoteSigned" not in said
+    assert "-ExecutionPolicy Bypass" in said
+
+
+def test_a_window_that_alone_refuses_is_told_to_open_another(here, monkeypatch):
+    """The other way round, and the only case whose fix is not a command."""
+    here.system = "Windows"
+    policy(monkeypatch, "Restricted", Process="Restricted", CurrentUser="RemoteSigned")
+    finding = checks.scripts_finding(here)
+    assert finding.status == WARN
+    said = written([finding])
+    assert "though a new one would" in finding.title
+    assert "Close this one and open a new terminal." in said
+    assert "Set-ExecutionPolicy" not in said
+
+
+def test_the_policy_in_force_and_the_one_that_lasts_are_read_apart(monkeypatch):
+    monkeypatch.setattr(checks.security, "powershell",
+                        lambda *a, **k: "Bypass\n" + listing(Process="Bypass",
+                                                             CurrentUser="AllSigned"))
+    answer = checks.execution_policy()
+    assert (answer.effective, answer.scope) == ("Bypass", "Process")
+    assert (answer.lasting, answer.lasting_scope) == ("AllSigned", "CurrentUser")
 
 
 # --- a zip unpacked one level too deep -------------------------------------- #
@@ -722,7 +779,7 @@ def test_nothing_activated_is_said_plainly_with_how_to_activate(here, course, mo
     assert finding.status == WARN
     said = written([finding])
     assert "pixi shell" in said
-    assert "pixi run im check" in said
+    assert "pixi --quiet run im check" in said
 
 
 def test_a_conda_environment_in_the_way_names_itself(here, course, monkeypatch):
@@ -1038,15 +1095,56 @@ def test_a_clean_run_says_so_and_succeeds():
     assert "Nothing here looks wrong" in "\n".join(lines)
 
 
-def test_the_scan_shows_only_what_is_wrong():
+def test_only_what_can_be_acted_on_reaches_the_screen():
     lines = []
     doctor.diagnose(lines.append, checks=quiet(
         checks.Finding(OK, checks.MACHINE, "macOS"),
-        checks.Finding(WARN, checks.PIXI, "something to fix", advice=["fix it"])))
+        checks.Finding(WARN, checks.PIXI, "something to fix",
+                       detail=["seen at /somewhere"],
+                       advice=["The long way round, which is why this is wrong."],
+                       fix=["    do this"])))
     printed = "\n".join(lines)
-    assert "macOS" not in printed
     assert "something to fix" in printed
-    assert "1 other thing was looked at and found fine." in printed
+    assert "    do this" in printed
+    assert "macOS" not in printed                  # nothing that was fine
+    assert "The long way round" not in printed     # nor the reasoning behind it
+    assert "seen at /somewhere" not in printed     # nor what it was read off
+
+
+def test_a_finding_with_no_short_answer_falls_back_to_its_long_one():
+    """Worse to read than a fix, and better than saying nothing at all."""
+    lines = []
+    doctor.diagnose(lines.append, checks=quiet(
+        checks.Finding(FAIL, checks.PIXI, "something is wrong",
+                       advice=["Here is the long way round."])))
+    assert "Here is the long way round." in "\n".join(lines)
+
+
+def test_every_block_has_a_blank_line_on_each_side_and_never_two():
+    lines = []
+    doctor.diagnose(lines.append, checks=quiet(
+        checks.Finding(FAIL, checks.PIXI, "one", fix=["    do this"]),
+        checks.Finding(WARN, checks.FOLDER, "two", fix=["", "    and this", ""])))
+    assert lines[0] == ""
+    assert lines[-1] == ""
+    assert "\n\n\n" not in "\n".join(lines)
+    for number, line in enumerate(lines):
+        if line.startswith(("✓", "!", "✗", "+", "x")) and number:
+            assert lines[number - 1] == "", f"no blank line before {line!r}"
+            assert lines[number + 1] == "", f"no blank line after {line!r}"
+
+
+def test_the_reasoning_is_kept_for_whoever_wants_it(tmp_path, monkeypatch):
+    """It is moved out of the student's way, not thrown away."""
+    monkeypatch.setenv("IM_COURSE_FOLDER", str(tmp_path))
+    finding = checks.Finding(FAIL, checks.PIXI, "something is wrong",
+                             advice=["The long way round."], fix=["    do this"])
+    lines = []
+    doctor.diagnose(lines.append, verbose=True, checks=quiet(finding))
+    assert "The long way round." in "\n".join(lines)
+
+    doctor.diagnose(lambda _: None, report=True, cwd=tmp_path, checks=quiet(finding))
+    assert "The long way round." in (tmp_path / doctor.REPORT_NAME).read_text()
 
 
 def test_verbose_shows_everything_that_was_looked_at():
@@ -1083,7 +1181,7 @@ def test_a_failure_fails_the_command_and_is_listed_first():
         checks.Finding(FAIL, checks.PIXI, "a failure", advice=["first"])))
     assert code == 1
     printed = "\n".join(lines)
-    assert printed.index("1. a failure") < printed.index("2. a warning")
+    assert printed.index("a failure") < printed.index("a warning")
 
 
 def test_a_check_that_crashes_costs_only_itself():
@@ -1133,7 +1231,7 @@ def test_the_command_runs_from_outside_a_course_folder(tmp_path, monkeypatch):
     result = CliRunner().invoke(main, ["doctor", "--offline"])
     assert result.exit_code == 1                      # no course folder is a failure
     assert "You are not in your course folder" in result.output
-    assert "What to do" in result.output
+    assert "File -> Open Folder" in result.output
 
 
 def test_the_command_runs_inside_one(course, monkeypatch):
@@ -1141,5 +1239,14 @@ def test_the_command_runs_inside_one(course, monkeypatch):
     monkeypatch.setattr(checks.security, "survey", lambda _: Survey(products=[]))
     monkeypatch.setattr(checks, "run_briefly", lambda *a, **k: None)
     result = CliRunner().invoke(main, ["doctor", "--offline"])
+    assert "--offline" in result.output               # the internet was not looked at
+    assert "im doctor --report" in result.output      # and where to go if this fails
+
+
+def test_verbose_is_where_the_whole_scan_still_lives(course, monkeypatch):
+    monkeypatch.setenv("IM_COURSE_FOLDER", str(course))
+    monkeypatch.setattr(checks.security, "survey", lambda _: Survey(products=[]))
+    monkeypatch.setattr(checks, "run_briefly", lambda *a, **k: None)
+    result = CliRunner().invoke(main, ["doctor", "--offline", "-v"])
     assert str(course) in result.output
     assert "Internet access" in result.output

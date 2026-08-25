@@ -76,24 +76,23 @@ def check() -> None:
               help="Also write a file to send to your instructor.")
 @click.option("--offline", is_flag=True,
               help="Skip the checks that need the internet.")
-@click.option("--upgrade/--no-upgrade", default=None,
-              help="Upgrade `im` first, or leave it, without being asked.")
+@click.option("--no-upgrade", is_flag=True,
+              help="Do not upgrade `im` itself first.")
 @click.option("-v", "--verbose", is_flag=True,
               help="Also show the things that were looked at and were fine.")
-def doctor(report: bool, offline: bool, upgrade: bool | None, verbose: bool) -> None:
+def doctor(report: bool, offline: bool, no_upgrade: bool, verbose: bool) -> None:
     """Work out why the course setup is not working.
 
     Unlike the other commands this one runs anywhere, because not being in the
     course folder is one of the things it is there to notice.
 
     The one thing it will change is `im` itself: a stale `im` is the one fault
-    that would otherwise be diagnosed by the very code that has the bug. It
-    asks first, and everything else it only reads.
+    that would otherwise be diagnosed by the very code that has the bug, so it
+    upgrades itself first and then runs what was typed. Everything else it
+    only reads.
     """
-    if not offline and upgrade is not False:
-        asking = (lambda question: click.confirm(question, default=True)) \
-            if upgrade is None else None
-        stop = release.upgrade_if_newer(click.echo, confirm=asking)
+    if not offline and not no_upgrade:
+        stop = release.upgrade_if_newer(click.echo)
         if stop is not None:
             raise SystemExit(stop)
     raise SystemExit(diagnose(click.echo, offline=offline, report=report,

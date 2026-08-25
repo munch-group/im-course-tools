@@ -265,50 +265,124 @@ def upgradable(monkeypatch, tools):
     install = Install(PIP, "0.1.3", Path("/x"))
     monkeypatch.setattr(release, "describe", lambda *a, **k: install)
     monkeypatch.setattr(release, "ask_index", lambda *a, **k: "0.2.0")
-    monkeypatch.setattr(release.sys.stdin, "isatty", lambda: True)
     return install
 
 
-def ran(monkeypatch, returncode: int, becomes: str = "0.2.0") -> list:
-    """Stand in for the upgrade, and for the version probe that follows it.
+def ran(monkeypatch, returncode: int, becomes: str = "0.2.0", again: int = 0) -> list:
+    """Stand in for the upgrade, the version probe after it, and the rerun.
 
     `becomes` is what the package reports afterwards, which is how an upgrade
-    that ran perfectly and changed nothing gets to be tested.
+    that ran perfectly and changed nothing gets to be tested. `again` is what
+    the command says for itself when it is run the second time.
     """
     calls = []
 
     def fake_run(command, **kwargs):
-        probing = any("importlib.metadata" in str(part) for part in command)
-        if not probing:
-            calls.append(command)
+        if any("importlib.metadata" in str(part) for part in command):
+            return type("Finished", (), {"returncode": 0, "stdout": f"{becomes}\n"})()
+        calls.append((command, kwargs))
+        # The first is the upgrade, and anything after it is the command being
+        # run again on what the upgrade installed.
         return type("Finished", (), {
-            "returncode": 0 if probing else returncode,
-            "stdout": f"{becomes}\n",
+            "returncode": returncode if len(calls) == 1 else again,
+            "stdout": "",
         })()
 
     monkeypatch.setattr(release.subprocess, "run", fake_run)
+    monkeypatch.setattr(release.sys, "argv", ["im", "doctor", "--report"])
     return calls
 
 
-def test_a_successful_upgrade_asks_for_the_command_to_be_run_again(upgradable, monkeypatch):
+def test_a_successful_upgrade_runs_the_whole_command_again(upgradable, monkeypatch):
     calls = ran(monkeypatch, 0)
     lines = []
     assert release.upgrade_if_newer(lines.append, timeout=0.1) == 0
-    assert len(calls) == 1
-    printed = "\n".join(lines)
-    assert "cannot swap itself out" in printed
-    assert "run your command again" in printed
+    assert len(calls) == 2                      # the upgrade, then the command
+    assert calls[1][0][-2:] == ["doctor", "--report"]
+    assert "Running `im doctor --report` again" in "\n".join(lines)
+
+
+def test_nobody_is_asked_whether_to_upgrade(upgradable, monkeypatch):
+    """The question is one a student cannot answer — they do not know what is
+    in the newer one, and they are running this because something is already
+    wrong. Not even the terminal is asked whether there is somebody there."""
+    monkeypatch.setattr(release.sys.stdin, "isatty",
+                        lambda: pytest.fail("looked for somebody to ask"))
+    calls = ran(monkeypatch, 0)
+    lines = []
+    release.upgrade_if_newer(lines.append, timeout=0.1)
+    assert len(calls) == 2
+    assert "?" not in "\n".join(lines)
+
+
+def test_what_the_new_one_says_is_what_im_exits_with(upgradable, monkeypatch):
+    """The student typed one command and gets that command's answer, not the
+    upgrade's."""
+    ran(monkeypatch, 0, again=1)
+    assert release.upgrade_if_newer(lambda line: None, timeout=0.1) == 1
+
+
+def test_the_command_run_again_is_not_allowed_to_upgrade_as_well(upgradable, monkeypatch):
+    calls = ran(monkeypatch, 0)
+    release.upgrade_if_newer(lambda line: None, timeout=0.1)
+    assert calls[1][1]["env"]["IM_NO_UPDATE_CHECK"] == "1"
+
+
+def test_a_course_install_is_run_again_through_pixi_quietly(tools, tmp_path):
+    """pixi is how everything else in that folder is reached, and its own
+    progress is not what was asked for."""
+    install = Install(CONDA_PROJECT, "0.1.3", Path("/x"), project=tmp_path)
+    command, folder = release.rerun_command(install, ["doctor", "--report"])
+    assert command == ["/bin/pixi", "--quiet", "run", "im", "doctor", "--report"]
+    assert folder == tmp_path
+
+
+def test_anywhere_else_it_is_the_script_beside_this_interpreter(monkeypatch, tmp_path,
+                                                                tools):
+    """Not whatever `im` means on this PATH, which on a machine carrying two
+    of them would pick the wrong one as often as not."""
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin" / "im").write_text("")
+    monkeypatch.setattr(release.sys, "executable", str(tmp_path / "bin" / "python"))
+    command, folder = release.rerun_command(Install(PIP, "0.1.3", Path("/x")), ["check"])
+    assert command == [str(tmp_path / "bin" / "im"), "check"]
+    assert folder is None
+
+
+def test_without_a_script_the_interpreter_is_asked_for_it_by_name(monkeypatch, tmp_path,
+                                                                  tools):
+    monkeypatch.setattr(release.sys, "executable", str(tmp_path / "python"))
+    command, _ = release.rerun_command(Install(PIP, "0.1.3", Path("/x")), ["check"])
+    assert command == [str(tmp_path / "python"), "-m", "im_course_tools", "check"]
+
+
+def test_a_new_one_that_will_not_start_says_so_rather_than_pretending(upgradable,
+                                                                      monkeypatch):
+    calls = ran(monkeypatch, 0)
+
+    def upgrade_then_refuse(command, **kwargs):
+        if any("importlib.metadata" in str(part) for part in command):
+            return type("Finished", (), {"returncode": 0, "stdout": "0.2.0\n"})()
+        calls.append((command, kwargs))
+        if len(calls) > 1:
+            raise OSError("no such file")
+        return type("Finished", (), {"returncode": 0, "stdout": ""})()
+
+    monkeypatch.setattr(release.subprocess, "run", upgrade_then_refuse)
+    lines = []
+    assert release.upgrade_if_newer(lines.append, timeout=0.1) == 1
+    assert "could not be started" in "\n".join(lines)
 
 
 def test_an_upgrade_that_ran_and_changed_nothing_is_not_called_a_success(upgradable,
                                                                           monkeypatch):
     """Otherwise the student is sent round the same loop for as long as they will go."""
-    ran(monkeypatch, 0, becomes="0.1.3")
+    calls = ran(monkeypatch, 0, becomes="0.1.3")
     lines = []
     assert release.upgrade_if_newer(lines.append, timeout=0.1) == 1
     printed = "\n".join(lines)
     assert "still 0.1.3" in printed
-    assert "run your command again" not in printed
+    assert len(calls) == 1                      # and it was not run again
 
 
 def test_the_version_afterwards_is_read_off_disk_for_a_conda_install(tmp_path):
@@ -318,37 +392,11 @@ def test_the_version_afterwards_is_read_off_disk_for_a_conda_install(tmp_path):
 
 
 def test_a_failed_upgrade_stops_with_its_own_code_and_says_why(upgradable, monkeypatch):
-    ran(monkeypatch, 3)
+    calls = ran(monkeypatch, 3)
     lines = []
     assert release.upgrade_if_newer(lines.append, timeout=0.1) == 3
     assert "did not finish cleanly" in "\n".join(lines)
-    assert "run your command again" not in "\n".join(lines)
-
-
-def test_saying_no_carries_on_and_leaves_the_command_behind(upgradable, monkeypatch):
-    calls = ran(monkeypatch, 0)
-    lines = []
-    assert release.upgrade_if_newer(lines.append, confirm=lambda q: False,
-                                    timeout=0.1) is None
-    assert calls == []
-    assert "pip install --upgrade" in "\n".join(lines)
-
-
-def test_saying_yes_goes_ahead(upgradable, monkeypatch):
-    calls = ran(monkeypatch, 0)
-    assert release.upgrade_if_newer(lambda line: None, confirm=lambda q: True,
-                                    timeout=0.1) == 0
-    assert len(calls) == 1
-
-
-def test_nothing_is_asked_when_nobody_is_there_to_answer(upgradable, monkeypatch):
-    """Piped to a file, the question would either hang or answer itself."""
-    monkeypatch.setattr(release.sys.stdin, "isatty", lambda: False)
-    calls = ran(monkeypatch, 0)
-    assert release.upgrade_if_newer(lambda line: None,
-                                    confirm=lambda q: pytest.fail("asked anyway"),
-                                    timeout=0.1) == 0
-    assert len(calls) == 1
+    assert len(calls) == 1                      # and it was not run again
 
 
 def test_an_up_to_date_im_is_left_alone(monkeypatch, tools):

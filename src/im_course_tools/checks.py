@@ -141,6 +141,19 @@ POLICY_QUERY = ("Get-ExecutionPolicy; Get-ExecutionPolicy -List | ForEach-Object
 # The order PowerShell reads them in: the first that is not Undefined wins.
 POLICY_SCOPES = ("MachinePolicy", "UserPolicy", "Process", "CurrentUser", "LocalMachine")
 
+# The scope a window is started with, which `powershell -ExecutionPolicy Bypass`
+# sets and which dies with the window. Every other scope outlives it.
+TEMPORARY_SCOPE = "Process"
+
+# Where a rule comes from when it is not the student's to change.
+IMPOSED_SCOPES = ("MachinePolicy", "UserPolicy")
+
+# What Windows enforces when no scope has been set at all. Taken as read rather
+# than asked, because there is no way to ask it of a window that is carrying a
+# Process scope of its own. Taking it wrongly costs one harmless command; not
+# taking it costs a student who has done as they were told and is still stuck.
+WINDOWS_DEFAULT = "Restricted"
+
 # The two that stop the scripts pixi and VS Code write from running at all.
 POLICY_TITLES = {"restricted": "PowerShell is not allowed to run scripts",
                  "allsigned": "PowerShell only runs scripts that are signed"}
@@ -150,13 +163,22 @@ DRIVE_REMOVABLE, DRIVE_REMOTE = 2, 4
 
 @dataclass
 class Finding:
-    """One thing looked at: what it is, what was seen, and what to do."""
+    """One thing looked at: what it is, what was seen, and what to do.
+
+    `fix` is what a stuck student reads: the commands to paste, and at most a
+    line saying which to paste. `advice` is the same answer explained, for
+    `--verbose` and for the file `--report` writes, where the person reading
+    has time to spend and is usually an instructor. A finding with no `fix`
+    falls back to its `advice`, so the worst that a missing one costs is the
+    long way round rather than nothing at all.
+    """
 
     status: str
     group: str
     title: str
     detail: list[str] = field(default_factory=list)
     advice: list[str] = field(default_factory=list)
+    fix: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -496,13 +518,31 @@ def append_command(shell: str | None, target: Path) -> str:
     return f"echo '{path_line(shell)}' >> {tilde(target)}"
 
 
-def execution_policy() -> tuple[str, str | None] | None:
-    """What PowerShell allows scripts to do, and the scope that decides it.
+@dataclass
+class Policy:
+    """What PowerShell allows, and whether it will still allow it tomorrow."""
 
-    The scope matters as much as the answer. A policy a student set, or one
-    Windows came with, is theirs to change in a single command; one arriving
-    through MachinePolicy or UserPolicy is the university's, and telling them
-    to run Set-ExecutionPolicy against it wastes the one thing they will try.
+    effective: str              # what this window is enforcing
+    scope: str | None           # the scope that decides that, where one is set
+    lasting: str                # what a window opened later would enforce
+    lasting_scope: str | None   # and the scope that would decide that
+
+
+def execution_policy() -> Policy | None:
+    """What PowerShell allows scripts to do, where it comes from, and how long.
+
+    The scope matters as much as the answer, twice over. A policy a student
+    set, or one Windows came with, is theirs to change in a single command; one
+    arriving through MachinePolicy or UserPolicy is the university's, and
+    telling them to run Set-ExecutionPolicy against that wastes the one thing
+    they will try.
+
+    And a policy in the Process scope is the one `powershell -ExecutionPolicy
+    Bypass` puts there, which lasts exactly as long as the window it was typed
+    in. Reading only what is in force here would tell a student who has just
+    been given that very advice that all is well — truthfully, in the window
+    they are standing in, and uselessly, because every window they open
+    tomorrow will refuse a script again.
     """
     output = security.powershell(POLICY_QUERY)
     if output is None:
@@ -514,11 +554,24 @@ def execution_policy() -> tuple[str, str | None] | None:
     for line in lines[1:]:
         scope, _, value = line.partition("=")
         scopes[scope.strip()] = value.strip()
-    for scope in POLICY_SCOPES:
-        value = scopes.get(scope, "")
-        if value and value.lower() != "undefined":
-            return lines[0], scope
-    return lines[0], None
+
+    def decided_by(considering) -> tuple[str, str] | None:
+        for scope in considering:
+            value = scopes.get(scope, "")
+            if value and value.lower() != "undefined":
+                return value, scope
+        return None
+
+    here = decided_by(POLICY_SCOPES)
+    outlasting = decided_by([s for s in POLICY_SCOPES if s != TEMPORARY_SCOPE])
+    if outlasting is not None:
+        lasting, lasting_scope = outlasting
+    elif scopes.get(TEMPORARY_SCOPE, "Undefined").lower() == "undefined":
+        # Nothing is set anywhere, so what is in force is the default itself.
+        lasting, lasting_scope = lines[0], None
+    else:
+        lasting, lasting_scope = WINDOWS_DEFAULT, None
+    return Policy(lines[0], here[1] if here else None, lasting, lasting_scope)
 
 
 def missing_packages(python: Path, timeout: float = 120.0) -> list[str] | None:
@@ -689,6 +742,14 @@ def interception_title(vendors) -> str:
     return f"{' and '.join(vendors)} is opening pixi's downloads on the way in"
 
 
+def scanning_briefly(products) -> list[str]:
+    """The same job of work, as the three lines somebody will actually do."""
+    named = products[0] if len(products) == 1 else "your antivirus"
+    return [f"In {named}, turn off HTTPS or SSL scanning (also called encrypted",
+            "connection scanning, web shield or web protection). Or pause",
+            "protection for ten minutes, run `pixi install`, and turn it back on."]
+
+
 def scanning_advice(ctx: Context, products, title: str) -> list[str]:
     """The paragraph that explains inspected traffic, named after what is here.
 
@@ -746,6 +807,11 @@ def machine_check(ctx: Context) -> Finding:
                 "Find Terminal (or VS Code) in Applications, right-click it, choose",
                 "Get Info and untick 'Open using Rosetta'. Quit it, open it again,",
                 "and run `pixi install` in your course folder.",
+            ], fix=[
+                "Applications -> right-click Terminal (or VS Code) -> Get Info,",
+                "untick 'Open using Rosetta', quit it and open it again. Then:",
+                "",
+                "    pixi install",
             ])
         return Finding(OK, MACHINE, title, detail)
 
@@ -761,7 +827,9 @@ def machine_check(ctx: Context) -> Finding:
                        "so the checks below know less about this machine than they",
                        "would about one of those. Everything may well be fine. Bring",
                        "anything that looks odd to class.",
-                   ])
+                   ], fix=["Nothing to do. The course is taught on macOS and Windows, so",
+                          "these checks know less about this machine than about one of",
+                          "those."])
 
 
 def version_check(ctx: Context) -> Finding:
@@ -786,15 +854,18 @@ def version_check(ctx: Context) -> Finding:
         else:
             advice += ["", "Upgrade it with:", ""]
             advice += [f"    {line}" for line in release.as_typed(prepared)]
+        short = ["Bring this line to class: `im` cannot upgrade itself here."] \
+            if prepared is None else [f"    {line}" for line in release.as_typed(prepared)]
         return Finding(WARN, TOOL, f"im {install.version}, and {available} is out",
-                       detail, advice)
+                       detail, advice, fix=short)
 
     if install.kind == release.SOURCE:
         return Finding(WARN, TOOL, f"im {install.version}, run from a checkout", detail, [
             "The code being run is not the code that was installed, so nothing",
             "would change if it were upgraded. That is right for whoever is",
             "working on `im` and wrong for a student.",
-        ])
+        ], fix=["Nothing to do, unless you are a student, in which case bring",
+               "this line to class."])
 
     return Finding(OK, TOOL, f"im {install.version}", detail)
 
@@ -825,11 +896,15 @@ def folder_check(ctx: Context) -> Finding:
         advice.append("it and run `im doctor` again:")
         advice.append("")
         advice.extend(f'    cd "{guess}"' for guess in guesses)
+        short = ["Change into it and run this again:", ""] + \
+            [f'    cd "{guess}"' for guess in guesses] + ["    im doctor"]
     else:
         advice.append("Open your course folder in VS Code and use the terminal there")
         advice.append("(Terminal -> New Terminal). It always starts in the right place.")
+        short = ["Open your course folder in VS Code (File -> Open Folder), then",
+                 "Terminal -> New Terminal, and run `im doctor` there."]
     return Finding(FAIL, FOLDER, "You are not in your course folder",
-                   [f"You are in {ctx.cwd}"], advice)
+                   [f"You are in {ctx.cwd}"], advice, fix=short)
 
 
 def nested_finding(ctx: Context, inside: Path) -> Finding:
@@ -872,7 +947,9 @@ def nested_finding(ctx: Context, inside: Path) -> Finding:
             "where the outer one is, and delete the empty one left behind.",
         ]
     return Finding(FAIL, FOLDER, "Your course folder is the one inside this one",
-                   detail, advice)
+                   detail, advice, fix=["Change into it and run this again:", "",
+                                        f'    cd "{inside}"',
+                                        "    im doctor"])
 
 
 def cloud_finding(ctx: Context, path: Path) -> Finding | None:
@@ -904,7 +981,11 @@ def cloud_finding(ctx: Context, path: Path) -> Finding | None:
         f"    {move}",
         f'    cd "{elsewhere}"',
         "    pixi install",
-    ])
+    ], fix=[f"Move it somewhere that does not sync, and install it again there:",
+            "",
+            f"    {move}",
+            f'    cd "{elsewhere}"',
+            "    pixi install"])
 
 
 def letters_finding(ctx: Context, path: Path) -> Finding | None:
@@ -925,7 +1006,10 @@ def letters_finding(ctx: Context, path: Path) -> Finding | None:
                        "If pixi keeps failing, move the course folder somewhere plainer:",
                        "",
                        f"    {move}",
-                   ])
+                   ], fix=["Nothing to do unless pixi keeps failing. If it does, move the",
+                           "course folder somewhere with plain English letters in the path:",
+                           "",
+                           f"    {move}"])
 
 
 def length_finding(ctx: Context, path: Path) -> Finding | None:
@@ -958,7 +1042,11 @@ def length_finding(ctx: Context, path: Path) -> Finding | None:
                        f'    move "{path}" C:\\im-course',
                        "    cd C:\\im-course",
                        "    pixi install",
-                   ])
+                   ], fix=["Move the course folder near the top of the drive:",
+                           "",
+                           f'    move "{path}" C:\\im-course',
+                           "    cd C:\\im-course",
+                           "    pixi install"])
 
 
 def drive_finding(ctx: Context, path: Path) -> Finding | None:
@@ -977,7 +1065,8 @@ def drive_finding(ctx: Context, path: Path) -> Finding | None:
         "is slow enough at that to look like a hang, and it disappears when the",
         "drive does. Copy the course folder onto this computer's own disk, for",
         "example into your user folder, and run `pixi install` there.",
-    ])
+    ], fix=["Copy the course folder onto this computer's own disk, into your",
+            "user folder, and run `pixi install` there."])
 
 
 def path_checks(ctx: Context) -> list[Finding]:
@@ -1004,6 +1093,11 @@ def writable_check(ctx: Context) -> Finding | None:
         probe_file.write_text("checking", encoding="utf-8")
     except OSError as error:
         if ctx.system == "Windows":
+            short = [
+                "Windows Security -> Virus & threat protection -> Ransomware",
+                "protection -> Allow an app through controlled folder access, and",
+                "add pixi. Or move the course folder into your own user folder.",
+            ]
             advice = [
                 "Something is refusing writes into this folder. On Windows that is",
                 "almost always one of two things:",
@@ -1017,6 +1111,11 @@ def writable_check(ctx: Context) -> Finding | None:
                 "where you certainly may write.",
             ]
         else:
+            short = [
+                "System Settings -> Privacy & Security -> Files and Folders, and",
+                "give Terminal (or VS Code) access to the folder it is in. Or move",
+                "the course folder into your home folder.",
+            ]
             advice = [
                 "Something is refusing writes into this folder. On a Mac that is",
                 "usually the privacy permission for the app you are typing in:",
@@ -1026,7 +1125,7 @@ def writable_check(ctx: Context) -> Finding | None:
                 "Failing that, move the course folder into your home folder.",
             ]
         return Finding(FAIL, FOLDER, "Nothing can be written into your course folder",
-                       [str(error)], advice)
+                       [str(error)], advice, fix=short)
     finally:
         try:
             probe_file.unlink()
@@ -1051,10 +1150,14 @@ def disk_check(ctx: Context) -> Finding | None:
         "Downloads folder and the Trash, and if you have installed other pixi",
         "environments you no longer need, delete their .pixi folders.",
     ]
+    briefly = ["Empty the Downloads folder and the Trash. The environment needs a",
+               "few gigabytes, and pixi's download cache a few more."]
     if free < 3:
-        return Finding(FAIL, FOLDER, "There is not enough disk space left", detail, room)
+        return Finding(FAIL, FOLDER, "There is not enough disk space left", detail,
+                       room, fix=briefly)
     if free < 8:
-        return Finding(WARN, FOLDER, "Disk space is getting tight", detail, room)
+        return Finding(WARN, FOLDER, "Disk space is getting tight", detail,
+                       room, fix=briefly)
     return Finding(OK, FOLDER, "There is room for the environment", detail)
 
 
@@ -1089,7 +1192,9 @@ def pixi_check(ctx: Context) -> Finding:
                                "Put it there, then open a new terminal:",
                                "",
                                f"    {append_command(shell, files[0])}",
-                           ])
+                           ], fix=["Run this, then open a new terminal:",
+                                   "",
+                                   f"    {append_command(shell, files[0])}"])
         return Finding(FAIL, PIXI, "pixi is installed, but this terminal cannot see it",
                        [f"It is at {already[0]}"], [
                            "The installer adds pixi to your PATH, and a terminal only reads",
@@ -1098,7 +1203,9 @@ def pixi_check(ctx: Context) -> Finding:
                            "Close this terminal completely and open a new one, then run",
                            "`im doctor` again. In VS Code, close the terminal panel with the",
                            "bin icon and open a new terminal rather than reusing this one.",
-                       ])
+                       ], fix=["Close this terminal, open a new one, and run `im doctor`",
+                               "again. In VS Code use the bin icon rather than reusing this",
+                               "terminal."])
 
     install = ('powershell -ExecutionPolicy Bypass -c "irm -useb https://pixi.sh/install.ps1 | iex"'
                if ctx.system == "Windows" else "curl -fsSL https://pixi.sh/install.sh | sh")
@@ -1109,7 +1216,9 @@ def pixi_check(ctx: Context) -> Finding:
         f"    {install}",
         "",
         "Then close the terminal, open a new one, and run `im doctor` again.",
-    ])
+    ], fix=["Install it, then close this terminal and open a new one:",
+            "",
+            f"    {install}"])
 
 
 def shell_finding(ctx: Context) -> Finding:
@@ -1126,6 +1235,12 @@ def shell_finding(ctx: Context) -> Finding:
     return Finding(OK, SHELL, SHELL_NAMES.get(shell, shell), detail)
 
 
+def enforcing(value: str, scope: str | None, lead: str) -> str:
+    """One line naming a policy and where it comes from."""
+    return f"{lead} {value}" + (f", set for {scope}" if scope
+                                else ", which is Windows' own default")
+
+
 def scripts_finding(ctx: Context) -> Finding | None:
     """Whether PowerShell may run the scripts pixi and VS Code write.
 
@@ -1134,52 +1249,96 @@ def scripts_finding(ctx: Context) -> Finding | None:
     this system". `pixi shell` writes a script and runs it, and so does VS
     Code every time it activates an environment in its terminal, so this one
     setting stops both while pixi itself keeps working perfectly.
+
+    Asked of this window and of the next one separately, because they can
+    differ and the difference is invisible: a window started with the rule set
+    aside runs everything, right up until it is closed.
     """
     if ctx.system != "Windows":
         return None
-    answer = execution_policy()
-    if answer is None:
+    policy = execution_policy()
+    if policy is None:
         return None
-    policy, scope = answer
-    detail = [f"The execution policy is {policy}"
-              + (f", set for {scope}" if scope else ", which is Windows' own default")]
-    if policy.lower() not in POLICY_TITLES:
+
+    here = policy.effective.lower() in POLICY_TITLES
+    later = policy.lasting.lower() in POLICY_TITLES
+    detail = [enforcing(policy.effective, policy.scope, "This window is enforcing")]
+    if (policy.lasting, policy.lasting_scope) != (policy.effective, policy.scope):
+        detail.append(enforcing(policy.lasting, policy.lasting_scope,
+                                "A new window would enforce"))
+
+    if not here and not later:
         return Finding(OK, SHELL, "PowerShell is allowed to run scripts", detail)
+
+    if here and not later:
+        return Finding(WARN, SHELL,
+                       "This window will not run scripts, though a new one would",
+                       detail, [
+                           "Something set this window's own execution policy after it",
+                           "started, and that lasts exactly as long as the window does.",
+                           "`pixi shell` and VS Code's terminal both fail in here and both",
+                           "work in a terminal opened fresh.",
+                           "",
+                           "Close this one and open a new terminal.",
+                       ], fix=["Close this terminal and open a new one."])
 
     # The two refuse in different words, and the words are what a student
     # searches for, so the paragraph has to use the ones they were shown.
-    if policy.lower() == "restricted":
-        told = ['PowerShell will not run a script file here, and says "running',
-                'scripts is disabled on this system".']
+    blocking = policy.effective if here else policy.lasting
+    lead = "PowerShell" if here else "There, PowerShell"
+    if blocking.lower() == "restricted":
+        told = [f"{lead} will not run a script file, and says",
+                '"running scripts is disabled on this system".']
     else:
-        told = ["PowerShell will not run a script file here unless somebody has",
+        told = [f"{lead} will not run a script file unless somebody has",
                 'signed it, and says a script "is not digitally signed".']
     told += ["`pixi shell` writes one and runs it, and so does VS Code every time",
              "it activates an environment in its terminal, so both fail on this",
              "alone while pixi itself keeps working."]
-    if scope in ("MachinePolicy", "UserPolicy"):
+
+    if not here:
+        told = [
+            "This window was started with the rule set aside, which is what",
+            "`powershell -ExecutionPolicy Bypass` does and it lasts exactly as",
+            "long as the window. So everything works in here, and nothing will",
+            "work in the next terminal you open — which is a hard thing to",
+            "notice and a harder one to describe to anybody else.",
+            "",
+        ] + told
+
+    if policy.lasting_scope in IMPOSED_SCOPES:
         advice = told + [
             "",
-            f"This one is set by {scope}, which is a rule on the machine rather",
-            "than a setting of yours, so `Set-ExecutionPolicy -Scope CurrentUser`",
-            "will not change it. Start a PowerShell with the rule set aside for",
-            "that one window, and work in it:",
+            f"It is set by {policy.lasting_scope}, which is a rule on the machine",
+            "rather than a setting of yours, so `Set-ExecutionPolicy -Scope",
+            "CurrentUser` will not change it. Start a PowerShell with the rule",
+            "set aside for that one window, and work in it:",
             "",
             "    powershell -ExecutionPolicy Bypass",
             "",
             "If this is a university laptop, its IT support can lift the rule.",
         ]
+        short = ["This is set by the machine, so start a PowerShell with the rule",
+                 "set aside and work in that window:",
+                 "",
+                 "    powershell -ExecutionPolicy Bypass"]
     else:
         advice = told + [
             "",
             "Allow scripts for your own account, which is the setting Microsoft",
-            "recommends and needs no administrator:",
+            "recommends, needs no administrator, and outlives the window:",
             "",
             "    Set-ExecutionPolicy RemoteSigned -Scope CurrentUser",
             "",
             "Answer Y. It changes nothing for anyone else who uses this computer.",
         ]
-    return Finding(WARN, SHELL, POLICY_TITLES[policy.lower()], detail, advice)
+        short = ["Run this and answer Y:",
+                 "",
+                 "    Set-ExecutionPolicy RemoteSigned -Scope CurrentUser"]
+
+    title = POLICY_TITLES[blocking.lower()] if here else \
+        "PowerShell will refuse scripts in the next window you open"
+    return Finding(WARN, SHELL, title, detail, advice, fix=short)
 
 
 def pixi_path_finding(ctx: Context) -> Finding | None:
@@ -1224,7 +1383,9 @@ def pixi_path_finding(ctx: Context) -> Finding | None:
                        f"    {append_command(shell, files[0])}",
                        "",
                        f"Then open a new terminal, or run `source {tilde(files[0])}` here.",
-                   ])
+                   ], fix=["It works here and may not in the next terminal. Run this:",
+                           "",
+                           f"    {append_command(shell, files[0])}"])
 
 
 def shell_checks(ctx: Context) -> list[Finding]:
@@ -1246,7 +1407,7 @@ def environment_check(ctx: Context) -> list[Finding]:
             break
 
     if ctx.env_python is None:
-        return [Finding(FAIL, ENVIRONMENT, "It has not been installed yet",
+        return [Finding(FAIL, ENVIRONMENT, "The course environment has not been installed yet",
                         [f"There is no {env}"], [
                             "In your course folder, run:",
                             "",
@@ -1254,23 +1415,26 @@ def environment_check(ctx: Context) -> list[Finding]:
                             "",
                             "It downloads a few gigabytes the first time, so leave it several",
                             "minutes before deciding it has stopped.",
-                        ])]
+                        ], fix=["In your course folder, run this. It downloads a few",
+                                "gigabytes, so give it several minutes:",
+                                "",
+                                "    pixi install"])]
 
-    findings = [Finding(OK, ENVIRONMENT, "It is installed", [str(env)])]
+    findings = [Finding(OK, ENVIRONMENT, "The course environment is installed", [str(env)])]
     manifest, lock = ctx.folder / MARKER, ctx.folder / "pixi.lock"
     if not lock.exists():
         findings.append(Finding(WARN, ENVIRONMENT, "There is no pixi.lock", [], [
             "Without it, pixi solves the environment from scratch and may not",
             "build the same one everyone else has. Run `im update` to fetch the",
             "course's current copy of it.",
-        ]))
+        ], fix=["    im update"]))
     elif manifest.exists() and manifest.stat().st_mtime > lock.stat().st_mtime + 1:
         findings.append(Finding(WARN, ENVIRONMENT, "pixi.toml has changed since pixi.lock was made",
                                 [], [
                                     "The environment on disk may not be the one pixi.toml now asks",
                                     "for. Run `pixi install` in your course folder to catch it up,",
                                     "or `im update` to take the course's current files instead.",
-                                ]))
+                                ], fix=["    pixi install"]))
     return findings
 
 
@@ -1289,8 +1453,8 @@ def moved_check(ctx: Context) -> Finding | None:
     if origin is None:
         return None
     if same_folder(origin, ctx.folder):
-        return Finding(OK, ENVIRONMENT, "It was built for this folder")
-    return Finding(FAIL, ENVIRONMENT, "It was built for a different folder",
+        return Finding(OK, ENVIRONMENT, "The environment was built for this folder")
+    return Finding(FAIL, ENVIRONMENT, "The environment was built for a different folder",
                    [f"It was built for {origin}", f"but the course folder is {ctx.folder}"], [
                        "The course folder has been moved, renamed, or copied since the",
                        "environment was installed, and the environment did not come with",
@@ -1309,7 +1473,11 @@ def moved_check(ctx: Context) -> Finding | None:
                        "",
                        "If pixi does not know the `clean` command, delete the `.pixi`",
                        "folder inside your course folder yourself and run `pixi install`.",
-                   ])
+                   ], fix=["The folder has been moved or renamed. Build the environment",
+                           "again where it is now. None of your own work is touched:",
+                           "",
+                           "    pixi clean",
+                           "    pixi install"])
 
 
 def packages_check(ctx: Context) -> Finding | None:
@@ -1318,22 +1486,22 @@ def packages_check(ctx: Context) -> Finding | None:
         return None
     missing = missing_packages(ctx.env_python)
     if missing is None:
-        return Finding(WARN, ENVIRONMENT, "Could not ask it which packages it has",
+        return Finding(WARN, ENVIRONMENT, "Could not ask the environment which packages it has",
                        [f"{ctx.env_python} did not answer"], [
                            "The environment is there but its Python would not run. Rebuild it",
                            "by running `pixi install` in your course folder, and bring the",
                            "message it prints to class if it fails.",
-                       ])
+                       ], fix=["    pixi install"])
     if not missing:
-        return Finding(OK, ENVIRONMENT, "Everything the course needs is in it")
-    return Finding(FAIL, ENVIRONMENT, f"{len(missing)} of its packages are missing", missing, [
+        return Finding(OK, ENVIRONMENT, "Everything the course needs is in the environment")
+    return Finding(FAIL, ENVIRONMENT, f"{len(missing)} of the course's packages are missing", missing, [
         "Run `im update` in your course folder. It fetches the course's current",
         "pixi.toml and pixi.lock and installs them, which is what puts these",
         "back — along with anything else in the folder's setup that has moved on.",
         "",
         "If that fails on the download, the internet checks below are where the",
         "reason will be.",
-    ])
+    ], fix=["    im update"])
 
 
 def interpreter_check(ctx: Context) -> Finding | None:
@@ -1346,8 +1514,8 @@ def interpreter_check(ctx: Context) -> Finding | None:
     except OSError:
         inside = False
     if inside:
-        return Finding(OK, ENVIRONMENT, "`im` is running from inside it")
-    return Finding(WARN, ENVIRONMENT, "`im` is running from outside it",
+        return Finding(OK, ENVIRONMENT, "`im` is running from inside the course environment")
+    return Finding(WARN, ENVIRONMENT, "`im` is running from outside the course environment",
                    [f"This `im` runs on {sys.executable}", f"The environment is {env}"], [
                        "That is fine for `im doctor`, which looks at your course",
                        "environment directly rather than from inside it. It is not fine",
@@ -1357,8 +1525,11 @@ def interpreter_check(ctx: Context) -> Finding | None:
                        "",
                        "Run that one through pixi, from your course folder:",
                        "",
-                       "    pixi run im check",
-                   ])
+                       "    pixi --quiet run im check",
+                   ], fix=["Nothing is wrong here, but run `im check` through pixi so it",
+                           "sees the course environment:",
+                           "",
+                           "    pixi --quiet run im check"])
 
 
 def activation_check(ctx: Context) -> Finding | None:
@@ -1385,7 +1556,7 @@ def activation_check(ctx: Context) -> Finding | None:
 
     if active is not None and same_folder(active, env):
         named = os.environ.get("PIXI_ENVIRONMENT_NAME") or "default"
-        return Finding(OK, ENVIRONMENT, "It is active in this terminal",
+        return Finding(OK, ENVIRONMENT, "The course environment is active in this terminal",
                        [f"the {named} environment, at {env}"])
 
     def into(opening: str, *first: str) -> list[str]:
@@ -1398,13 +1569,13 @@ def activation_check(ctx: Context) -> Finding | None:
                 "The prompt changes while you are in it, and `exit` leaves again. Or",
                 "run a single command through pixi without stepping in at all:",
                 "",
-                "    pixi run im check"]
+                "    pixi --quiet run im check"]
 
     step = into("Step into it. From your course folder, or anywhere inside it:")
     instead = "Leave it and step into the course one, from your course folder:"
 
     if active is None and not root:
-        return Finding(WARN, ENVIRONMENT, "It is not active in this terminal", [], [
+        return Finding(WARN, ENVIRONMENT, "The course environment is not active in this terminal", [], [
             "It is installed, but nothing in this terminal is using it, so",
             "`python`, `pytest` and `jupyter` typed here are whichever ones the",
             "machine already had rather than the ones the course installed. That",
@@ -1414,7 +1585,10 @@ def activation_check(ctx: Context) -> Finding | None:
             "",
             "Notebooks in VS Code do not go through this: they pick their kernel",
             "themselves, in the picker at the top right.",
-        ])
+        ], fix=["`python` and `pytest` here are the machine's, not the course's.",
+               "From your course folder:",
+               "",
+               "    pixi shell"])
 
     if root and ctx.folder is not None and same_folder(Path(root), ctx.folder):
         named = os.environ.get("PIXI_ENVIRONMENT_NAME") or "another"
@@ -1426,7 +1600,7 @@ def activation_check(ctx: Context) -> Finding | None:
                            "",
                            "    exit",
                            "    pixi shell",
-                       ])
+                       ], fix=["    exit", "    pixi shell"])
 
     if root:
         return Finding(WARN, ENVIRONMENT, "A pixi environment from another folder is active",
@@ -1440,7 +1614,9 @@ def activation_check(ctx: Context) -> Finding | None:
                            "    exit",
                            f'    cd "{ctx.folder}"',
                            "    pixi shell",
-                       ])
+                       ], fix=["    exit",
+                               f'    cd "{ctx.folder}"',
+                               "    pixi shell"])
 
     if venv and not prefix:
         return Finding(WARN, ENVIRONMENT, "A Python virtual environment is active here",
@@ -1450,7 +1626,7 @@ def activation_check(ctx: Context) -> Finding | None:
                            "missing here.",
                            "",
                            *into(instead, "deactivate"),
-                       ])
+                       ], fix=["    deactivate", "    pixi shell"])
 
     named = os.environ.get("CONDA_DEFAULT_ENV") or "A conda environment"
     return Finding(WARN, ENVIRONMENT, f"{named} is active in this terminal, not the course one",
@@ -1465,7 +1641,12 @@ def activation_check(ctx: Context) -> Finding | None:
                        "is Anaconda doing it, and this turns it off for good:",
                        "",
                        "    conda config --set auto_activate_base false",
-                   ])
+                   ], fix=["    conda deactivate",
+                           "    pixi shell",
+                           "",
+                           "If conda activates itself in every new terminal, also run:",
+                           "",
+                           "    conda config --set auto_activate_base false"])
 
 
 def security_check(ctx: Context) -> list[Finding]:
@@ -1498,7 +1679,8 @@ def security_check(ctx: Context) -> list[Finding]:
                                         "If `pixi install` is failing with a certificate or network",
                                         "error, look at your antivirus settings first: they are the",
                                         "most common cause and this check could not rule them out.",
-                                    ]))
+                                    ], fix=["Nothing to do unless `pixi install` is failing. If it is,",
+                                            "look at your antivirus settings first."]))
     elif result.third_party:
         # One product is worth naming in the line a student reads; three are a
         # list, and the list belongs underneath it.
@@ -1517,7 +1699,8 @@ def security_check(ctx: Context) -> list[Finding]:
             if vendors:
                 ctx.explained = interception_title(vendors)
             findings.append(Finding(WARN, SECURITY, title, listed,
-                                    scanning_advice(ctx, result.third_party, title)))
+                                    scanning_advice(ctx, result.third_party, title),
+                                    fix=scanning_briefly(result.third_party)))
         elif verdict == CLEAR:
             # Only one of these two is evidence about pixi itself, so only one
             # of them gets to say so.
@@ -1538,7 +1721,9 @@ def security_check(ctx: Context) -> list[Finding]:
                 "pixi fetch a file itself, which is what tells apart security",
                 "software that is interfering from security software that is",
                 "merely installed.",
-            ]))
+            ], fix=["Nothing to do yet. Run `im doctor` again with a connection and",
+                    "without --offline, which is what tells security software that is",
+                    "in the way from security software that is merely installed."]))
     elif result.built_in:
         findings.append(Finding(OK, SECURITY,
                                 f"{result.built_in[0]} only, which does not get in the way"))
@@ -1555,7 +1740,9 @@ def security_check(ctx: Context) -> list[Finding]:
             "Windows Security -> Virus & threat protection -> Ransomware",
             "protection -> Allow an app through controlled folder access, and add",
             "pixi. Or keep the course folder outside those folders.",
-        ]))
+        ], fix=["Windows Security -> Virus & threat protection -> Ransomware",
+                "protection -> Allow an app through controlled folder access, and",
+                "add pixi. Or keep the course folder out of Documents and Desktop."]))
     return findings
 
 
@@ -1578,23 +1765,28 @@ def proxy_check(ctx: Context) -> Finding | None:
                            "",
                            *(f"    unset {name}" if ctx.system != "Windows"
                              else f"    Remove-Item Env:{name}" for name in broken),
-                       ])
+                       ], fix=["Unset it in this terminal and try again:",
+                               "",
+                               *(f"    unset {name}" if ctx.system != "Windows"
+                                 else f"    Remove-Item Env:{name}" for name in broken)])
     return Finding(WARN, INTERNET, "This terminal redirects downloads", detail, [
         "These settings send downloads through somewhere else, or point at a",
         "different list of certificate authorities. If you did not set them",
         "deliberately — a university network guide, or another course, often",
         "does — they can break pixi on their own while a browser stays happy.",
-    ])
+    ], fix=["If you did not set these on purpose, unset them and try again.",
+            "They can break pixi on their own while a browser stays happy."])
 
 
 def network_check(ctx: Context) -> list[Finding]:
     """Whether pixi's downloads can arrive, and arrive unopened."""
     if ctx.offline:
-        return [Finding(WARN, INTERNET, "Not checked, because --offline was asked for", [], [
+        return [Finding(WARN, INTERNET, "The internet was not checked, because --offline was asked for", [], [
             "The internet checks are the ones that find downloads being blocked",
             "or opened on the way in, which is what most broken installs turn out",
             "to be. Run `im doctor` without --offline once you have a connection.",
-        ])]
+        ], fix=["Run `im doctor` again without --offline once you have a",
+                "connection. These are the checks that find most broken installs."])]
 
     results, download = looked_at_the_network(ctx)
     if not results:
@@ -1617,7 +1809,9 @@ def network_check(ctx: Context) -> list[Finding]:
                             "If the browser works and this does not, something on this",
                             "machine is blocking programs other than the browser — a firewall",
                             "or the network protection part of an antivirus.",
-                        ])]
+                        ], fix=["Check wifi. If your network signs you in through a web page,",
+                                "open a browser and sign in first. If the browser works and",
+                                "this does not, a firewall or antivirus is blocking pixi."])]
 
     findings: list[Finding] = []
 
@@ -1629,7 +1823,8 @@ def network_check(ctx: Context) -> list[Finding]:
             FAIL, INTERNET, title,
             [f"{result.host}: the certificate says it was issued by {result.issuer}"
              for result in intercepted],
-            scanning_advice(ctx, vendors, title)))
+            scanning_advice(ctx, vendors, title),
+            fix=scanning_briefly(vendors)))
 
     unverified = grouped.get(probe.UNVERIFIED, [])
     if unverified and download.ok:
@@ -1648,7 +1843,10 @@ def network_check(ctx: Context) -> list[Finding]:
                 "`pixi install` does not use it and is unaffected. `im get` and",
                 "`im update` do, and will fail. Rebuilding the environment with",
                 "`pixi install` in your course folder puts a fresh list back.",
-            ]))
+            ], fix=["`pixi install` is unaffected; `im get` and `im update` will fail.",
+                    "Rebuild the environment to put a fresh list of authorities back:",
+                    "",
+                    "    pixi install"]))
     elif unverified:
         findings.append(Finding(
             FAIL, INTERNET, "The certificates for some hosts could not be verified",
@@ -1661,7 +1859,9 @@ def network_check(ctx: Context) -> list[Finding]:
                 "  - check the clock and time zone on this machine",
                 "  - if you are on a network that signs you in through a web page,",
                 "    open a browser and sign in first",
-            ]))
+            ], fix=["In this order: pause your antivirus for ten minutes and run",
+                    "`im doctor` again; check this machine's clock and time zone; if",
+                    "your network signs you in through a web page, sign in first."]))
 
     unknown = grouped.get(probe.UNKNOWN_CA, [])
     if unknown:
@@ -1676,7 +1876,8 @@ def network_check(ctx: Context) -> list[Finding]:
                 "",
                 "If pixi is failing, pause your antivirus for ten minutes and run",
                 "`im doctor` again to see whether this line changes.",
-            ]))
+            ], fix=["Nothing to do unless pixi is failing. If it is, pause your",
+                    "antivirus for ten minutes and run `im doctor` again."]))
 
     if unresolved:
         findings.append(Finding(
@@ -1686,7 +1887,8 @@ def network_check(ctx: Context) -> list[Finding]:
                 "either a DNS setting or something blocking these names in",
                 "particular. Try another network — a phone hotspot is the quickest",
                 "test — and if it works there, the block is on this one.",
-            ]))
+            ], fix=["Try a phone hotspot. If it works there, the block is on this",
+                    "network."]))
 
     if unreachable:
         findings.append(Finding(
@@ -1699,7 +1901,8 @@ def network_check(ctx: Context) -> list[Finding]:
                 "",
                 "Try a phone hotspot. If it works there, the block is on this",
                 "network; if it fails there too, it is on this machine.",
-            ]))
+            ], fix=["Try a phone hotspot. If it works there, the block is on this",
+                    "network; if it fails there too, it is on this machine."]))
 
     # Everything above this line was asked with Python, which trusts what the
     # operating system trusts and can be waved through where pixi is not. This
@@ -1708,7 +1911,8 @@ def network_check(ctx: Context) -> list[Finding]:
     if download.outcome == probe.REFUSED:
         title = "pixi's own download was refused over a certificate"
         findings.append(Finding(FAIL, INTERNET, title, download.lines,
-                                scanning_advice(ctx, vendors, title)))
+                                scanning_advice(ctx, vendors, title),
+                                fix=scanning_briefly(vendors)))
     elif download.outcome in (probe.STOPPED, probe.SLOW):
         findings.append(Finding(
             FAIL, INTERNET, "pixi's own download did not get through",
@@ -1720,7 +1924,9 @@ def network_check(ctx: Context) -> list[Finding]:
                 "university network that only allows web browsing will each do",
                 "this. Try a phone hotspot: if it works there, the block is on this",
                 "network, and if it fails there too, it is on this machine.",
-            ]))
+            ], fix=["This is the program that fails for you, failing here the same",
+                    "way. Try a phone hotspot: if it works there, the block is on",
+                    "this network; if it fails there too, it is on this machine."]))
     elif download.outcome == probe.PUZZLING:
         findings.append(Finding(
             WARN, INTERNET, "pixi could not finish a test download",
@@ -1729,7 +1935,8 @@ def network_check(ctx: Context) -> list[Finding]:
                 "a reason this check does not recognise. If `pixi install` works in",
                 "your course folder, ignore this; if it does not, bring these lines",
                 "to class.",
-            ]))
+            ], fix=["If `pixi install` works in your course folder, ignore this. If",
+                    "it does not, bring this line to class."]))
     elif download.ok:
         findings.append(Finding(
             OK, INTERNET, "pixi downloaded a file of its own without trouble",
@@ -1750,7 +1957,9 @@ def network_check(ctx: Context) -> list[Finding]:
                     "not yet valid, and the error talks about certificates rather than",
                     "about the clock. Set the date and time to update automatically,",
                     "and check the time zone while you are there.",
-                ]))
+                ], fix=["Set this machine's date and time to update automatically, and",
+                        "check the time zone while you are there. A clock this far out",
+                        "makes valid certificates look expired."]))
     return findings
 
 
@@ -1766,34 +1975,37 @@ def vscode_check(ctx: Context) -> list[Finding]:
     command = shutil.which("code")
 
     if command is None and not found:
-        return [Finding(WARN, EDITOR, "It was not found where it usually installs", [], [
+        return [Finding(WARN, EDITOR, "VS Code was not found where it usually installs", [], [
             "The course is taught in VS Code, and the notebooks are opened in it.",
             "If you are using something else on purpose, ignore this. Otherwise",
             "install it from https://code.visualstudio.com and open your course",
             "folder with File -> Open Folder.",
-        ])]
+        ], fix=["Unless you are using something else on purpose, install VS Code",
+                "from https://code.visualstudio.com and open your course folder",
+                "with File -> Open Folder."])]
 
     if command is None:
-        return [Finding(OK, EDITOR, "It is installed",
+        return [Finding(OK, EDITOR, "VS Code is installed",
                         [str(found[0]),
                          "The `code` command is not on PATH, so its extensions were not checked"])]
 
     listed = run_briefly([command, "--list-extensions"], 30)
     if listed is None:
-        return [Finding(OK, EDITOR, "It is installed", [command])]
+        return [Finding(OK, EDITOR, "VS Code is installed", [command])]
 
     installed = {line.strip().lower() for line in listed.splitlines() if line.strip()}
     missing = [(key, name) for key, name in EXTENSIONS if key not in installed]
     if not missing:
-        return [Finding(OK, EDITOR, "It is installed, with the Python and Jupyter extensions")]
-    return [Finding(WARN, EDITOR, "It is missing an extension the course needs",
+        return [Finding(OK, EDITOR, "VS Code is installed, with the Python and Jupyter extensions")]
+    return [Finding(WARN, EDITOR, "VS Code is missing an extension the course needs",
                     [name for _, name in missing], [
                         "Without these, VS Code opens a notebook but cannot run it, and the",
                         "kernel picker either stays empty or never finds your .pixi",
                         "environment. Install them with:",
                         "",
                         *(f"    code --install-extension {key}" for key, _ in missing),
-                    ])]
+                    ], fix=[*(f"    code --install-extension {key}"
+                              for key, _ in missing)])]
 
 
 # In the order a student should read them, which is also the order they run in:

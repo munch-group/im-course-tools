@@ -431,20 +431,56 @@ def announce_later(echo) -> None:
 
 # --- doing it --------------------------------------------------------------- #
 
-def rerun(echo, argv: list[str] | None = None) -> None:
-    """Ask for the command to be run again, because `im` cannot re-run itself.
+def rerun_command(install: Install, argv: list[str]) -> tuple[list[str], Path | None]:
+    """What to run the command again with, and the folder to run it in.
 
-    It could, on a Mac. It cannot on Windows, where the files it is running out
-    of are the files being replaced, and a half-swapped install is a far worse
-    place to leave a student than one extra line to type.
+    Not `im`, whatever `im` happens to mean on this PATH: the copy just
+    installed is the one that has to run, and on a machine carrying two of them
+    the name alone would pick the wrong one as often as not.
+
+    A student's `im` lives inside the course environment, so it is reached the
+    way everything else in that folder is reached — through pixi, in the
+    folder, quietly, since pixi's own progress is not what was asked for.
+    Anywhere else, the interpreter running this one is the interpreter that was
+    upgraded, and the console script sitting beside it is the new one.
+    """
+    pixi = shutil.which("pixi")
+    if install.kind == CONDA_PROJECT and pixi and install.project:
+        return [pixi, "--quiet", "run", "im", *argv], install.project
+    beside = Path(sys.executable).parent
+    for script in (beside / "im", beside / "im.exe", beside / "Scripts" / "im.exe"):
+        if script.is_file():
+            return [str(script), *argv], None
+    return [sys.executable, "-m", "im_course_tools", *argv], None
+
+
+def rerun(install: Install, echo, argv: list[str] | None = None) -> int:
+    """Run the whole command again, on the version that was just installed.
+
+    `im` cannot swap itself out from under itself — the modules it is running
+    are the ones already loaded, and on Windows the files are held open besides
+    — so the new one runs as a process of its own and this one hands back
+    whatever it says. A student typed one command and gets one command's worth
+    of output; that the tool stopped to fix itself in the middle is a detail
+    they never have to know about.
+
+    The child is told not to look for updates. Nothing should send it round
+    this loop a second time, and the only thing worse than an upgrade a student
+    did not ask for is two of them.
     """
     argv = sys.argv[1:] if argv is None else argv
+    command, folder = rerun_command(install, argv)
     echo("")
-    echo("Upgraded. `im` cannot swap itself out while it is running, so please")
-    echo("run your command again to use the new one:")
+    echo(f"Running `im {' '.join(argv)}` again on the new one.".rstrip())
     echo("")
-    echo(f"    im {' '.join(argv)}".rstrip())
-    echo("")
+    try:
+        finished = subprocess.run(command, cwd=str(folder) if folder else None,
+                                  env={**os.environ, "IM_NO_UPDATE_CHECK": "1"})
+    except OSError as error:
+        echo(f"The new `im` could not be started: {error}")
+        echo(f"Please run `im {' '.join(argv)}` again yourself.")
+        return 1
+    return finished.returncode
 
 
 def upgrade(install: Install, echo) -> int:
@@ -492,13 +528,19 @@ def upgrade(install: Install, echo) -> int:
     return 0
 
 
-def upgrade_if_newer(echo, confirm=None, timeout: float = 5.0) -> int | None:
-    """Upgrade `im` if there is a newer one, and say whether the command should stop.
+def upgrade_if_newer(echo, timeout: float = 5.0) -> int | None:
+    """Upgrade `im` if there is a newer one, run the command again, and stop.
 
-    None means carry on: there was nothing newer, or the student said no. An
-    exit code means stop, because carrying on is pointless either way — after a
-    successful upgrade the code that would carry on is the old code, and after
-    a failed one the reason would be buried under the rest of the output.
+    None means carry on, and there is only one reason for it: nothing newer
+    was there. Anything else is an exit code, because carrying on in this
+    process is pointless — the code that would carry on is the code that has
+    just been replaced.
+
+    Nobody is asked. A question here is one a student cannot answer: they do
+    not know what is in the newer one, they are running this command because
+    something is already wrong, and the commonest reason for a fault reaching a
+    hundred people at once is a fix that reached none of them. So it upgrades,
+    then runs what was actually typed and hands back what that says.
     """
     global _said
     if disabled():
@@ -516,22 +558,7 @@ def upgrade_if_newer(echo, confirm=None, timeout: float = 5.0) -> int | None:
     echo(f"This one is {install.described}.")
     echo("")
 
-    # Only worth asking when there is somebody there to answer. Piped into a
-    # file or run from a script, the question would hang or answer itself.
-    if confirm is not None and sys.stdin.isatty():
-        if not confirm("Upgrade it now?"):
-            prepared = upgrade_command(install)
-            if prepared is not None:
-                echo("")
-                echo("Left alone. When you want it:")
-                echo("")
-                for line in as_typed(prepared):
-                    echo(f"    {line}")
-                echo("")
-            return None
-
     code = upgrade(install, echo)
     if code != 0:
         return code
-    rerun(echo)
-    return 0
+    return rerun(install, echo)
