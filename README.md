@@ -72,10 +72,26 @@ already matches is left alone entirely rather than replaced by an identical
 copy of itself. What is replaced is kept as `<name>.backup` first, so a
 student who had edited one has it back.
 
+The exception is the two paths in `.vscode/settings.json` that `pixi run check`
+writes for this particular machine — where pixi is, and where this folder's
+Python is. No published copy can contain them, so they are left out of the
+comparison. Counted in, that one file would be out of date on every run for
+ever: replaced, stripped of both paths and backed up again, every single time.
+
 `pixi install` runs afterwards either way, including when nothing needed
 changing: `im update` is where a student is sent when the environment is
 broken, and skipping the install because the files were already right would
 turn them away in exactly the case the command exists for.
+
+`pixi run check` runs after that, for a related reason: building the environment
+is not the same as making it usable. The notebook kernel and the two VS Code
+paths above are `pixi run` tasks rather than packages, and the refresh has just
+undone both — the kernel lives inside the environment prefix pixi may have
+rebuilt from the new lock file, and the paths live in the settings.json that may
+have just been replaced with the published copy. That task puts both back, and
+ends by running `im check`, which is what `im update` used to finish by asking
+the student to go and do themselves. A course folder whose `pixi.toml` does not
+define it is left alone rather than failed on.
 
 ## When something is wrong
 

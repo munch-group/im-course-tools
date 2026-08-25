@@ -11,11 +11,18 @@ pixi is, and VS Code's settings are all fixed the same way an environment is,
 and all of them used to reach a student only by downloading the folder again
 and moving their work across by hand. A fix to any of them is worth as little
 as a fix nobody receives.
+
+Refreshing them is also what breaks them: the notebook kernel and the paths
+telling VS Code where pixi is are made by `pixi run` tasks rather than by
+packages, and both are undone by the very files this replaces. So the last
+thing `im update` does is hand back to the course folder's own `pixi run check`
+to put them there again.
 """
 
 from __future__ import annotations
 
 import io
+import re
 import shutil
 import subprocess
 import sys
@@ -46,6 +53,10 @@ REQUIRED = [
 # term arrives without anything here having to be told about it.
 ARCHIVE = "instructing-machines.zip"
 
+# Named on its own because it is the one file here that this machine writes into
+# as well as the website, which the comparison further down has to know about.
+SETTINGS = ".vscode/settings.json"
+
 # The files inside it that `im update` keeps current. Every one of them is
 # course plumbing rather than anybody's work: the environment pixi builds from,
 # the tasks `pixi run` offers, the script that tells VS Code where pixi is, and
@@ -60,7 +71,7 @@ FILES = (
     "pixi.lock",
     ".pin_pixi_path.py",
     ".gitignore",
-    ".vscode/settings.json",
+    SETTINGS,
     ".vscode/extensions.json",
 )
 
@@ -76,6 +87,37 @@ ESSENTIAL = ("pixi.toml", "pixi.lock")
 # environment — cannot happen now that the files arrive inside an archive that
 # is itself checked before anything is read out of it.
 SANITY = {"pixi.toml": "[workspace]", "pixi.lock": "version:"}
+
+# The two settings .pin_pixi_path.py writes into .vscode/settings.json, and the
+# comment block it puts above each of them.
+#
+# Both hold an absolute path belonging to one machine — where pixi is, and where
+# this folder's Python is — so the published settings.json cannot carry them and
+# never will. Compared as they stand, a student's pinned copy is therefore
+# different from the published one on every run for ever, and would be replaced,
+# stripped of its pins and left with a fresh .backup every single time. Taken
+# out of both sides first, what gets compared is the part the website is
+# actually publishing.
+LOCAL_SETTINGS = ("pixi-code.pixiExecutable", "python.defaultInterpreterPath")
+
+PINNED = re.compile(
+    r"(?:^[ \t]*//[^\n]*\n)*"                          # the comment above it
+    r"^[ \t]*\"(?:"
+    + "|".join(re.escape(name) for name in LOCAL_SETTINGS)
+    + r")\"[ \t]*:[ \t]*\"(?:[^\"\\]|\\.)*\",?[ \t]*\n"  # the setting
+    r"(?:[ \t]*\n)?",                                   # the blank line after
+    re.MULTILINE,
+)
+
+# The course folder's own name for "put this machine's setup right": it installs
+# the notebook kernel, writes the two settings above, and finishes by running
+# `im check`.
+SETUP_TASK = "check"
+
+# Whether the manifest still defines that task. Looked for rather than assumed,
+# so that dropping it from the course folder does not stop `im update` working
+# on the day it goes — the same tolerance ESSENTIAL buys for the files.
+DEFINES_SETUP = re.compile(rf"^[ \t]*{SETUP_TASK}[ \t]*=", re.MULTILINE)
 
 
 def check(echo) -> int:
@@ -141,16 +183,33 @@ def published(data: bytes) -> dict[str, bytes] | None:
     return found
 
 
-def differs(mine: Path, theirs: bytes) -> bool:
-    """Whether what is on disk is something other than what was published.
+def normalise(name: str, content: bytes) -> bytes:
+    """What is actually compared: the file, less what is not the website's business.
 
-    Compared with the line endings folded together, because an editor on
-    Windows can rewrite every line of a file without changing a word of it, and
-    a student whose editor did that should not be handed a fresh copy — and a
-    fresh .backup beside it — every single time they run this.
+    Line endings are folded together because an editor on Windows can rewrite
+    every line of a file without changing a word of it, and a student whose
+    editor did that should not be handed a fresh copy — and a fresh .backup
+    beside it — every single time they run this.
+
+    The pinned paths in .vscode/settings.json come out for the same reason: they
+    are written by this machine and cannot be in the published file, so leaving
+    them in would make that one file permanently and unfixably out of date. Both
+    sides go through here, so whatever is removed is removed from both and the
+    two are still judged on the same thing.
     """
+    content = content.replace(b"\r\n", b"\n")
+    if name == SETTINGS:
+        try:
+            content = PINNED.sub("", content.decode("utf-8")).encode("utf-8")
+        except UnicodeDecodeError:          # not text at all; compare it as it is
+            pass
+    return content
+
+
+def differs(mine: Path, theirs: bytes, name: str) -> bool:
+    """Whether what is on disk is something other than what was published."""
     try:
-        return mine.read_bytes().replace(b"\r\n", b"\n") != theirs.replace(b"\r\n", b"\n")
+        return normalise(name, mine.read_bytes()) != normalise(name, theirs)
     except OSError:
         return True
 
@@ -196,7 +255,7 @@ def update(folder: Path, echo) -> int:
     # rather than being replaced by an identical copy of itself and leaving a
     # .backup behind to say so.
     stale = [name for name in FILES if name in theirs
-             and differs(folder.joinpath(*name.split("/")), theirs[name])]
+             and differs(folder.joinpath(*name.split("/")), theirs[name], name)]
 
     echo("")
     for name in stale:
@@ -227,5 +286,34 @@ def update(folder: Path, echo) -> int:
         echo("\n`pixi install` did not finish cleanly. Bring the message above to class.")
         return result.returncode
 
-    echo("\nDone. Run `im check` to confirm.")
+    # `pixi install` builds the environment and stops there. Two of the things
+    # that make it usable are tasks rather than packages, and a task only
+    # happens when something runs it — and the refresh above has just undone
+    # both of them.
+    #
+    # The kernel a student picks in a notebook was installed into the
+    # environment prefix, which pixi may have rebuilt a moment ago from the lock
+    # file this command replaced. The paths telling VS Code where pixi and that
+    # environment are live in .vscode/settings.json, which is replaced with the
+    # published copy whenever the website changes it, and no published copy can
+    # carry a path belonging to one machine. Left here, a student who ran this
+    # to fix their setup would be handed back the two faults .pin_pixi_path.py
+    # exists to prevent.
+    #
+    # `pixi run check` is the course folder's own name for putting both back,
+    # and it ends by running `im check` — which is what this used to finish by
+    # asking the student to go and do themselves.
+    if not DEFINES_SETUP.search(theirs["pixi.toml"].decode("utf-8", "replace")):
+        echo("\nDone. Run `im check` to confirm.")
+        return 0
+
+    echo("\nSetting up the kernel and VS Code.\n")
+    result = subprocess.run([pixi, "run", SETUP_TASK], cwd=folder)
+    if result.returncode != 0:
+        echo("\nYour files and your environment are up to date, but "
+             f"`pixi run {SETUP_TASK}` did not finish cleanly.")
+        echo("Bring the message above to class.")
+        return result.returncode
+
+    echo("\nDone.")
     return 0

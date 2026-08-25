@@ -8,12 +8,14 @@ local preview, so nothing here touches the real site.
 
 import io
 import json
+import subprocess
 import zipfile
 from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
 
+from im_course_tools import environment
 from im_course_tools.cli import main
 
 CHAPTERS = ["iteration", "lists"]
@@ -321,3 +323,126 @@ def test_update_takes_the_folder_whatever_it_unpacks_into(run, course, site,
     site.joinpath(f"{ROOT}.zip").write_bytes(zip_bytes(TEMPLATE, root="im-2027"))
     run("update")
     assert (course / ".pin_pixi_path.py").exists()
+
+
+# --- the settings this machine writes into --------------------------------- #
+
+# The manifest as the course folder really ships it, with the task `im update`
+# hands the kernel and the VS Code paths to once the environment is built.
+WITH_SETUP = {**TEMPLATE,
+              "pixi.toml": TEMPLATE["pixi.toml"] + '\n[tasks]\ncheck = "im check"\n'}
+
+# What `pixi run check` puts into .vscode/settings.json on one machine, laid out
+# the way .pin_pixi_path.py lays it out: a comment, the setting, a blank line.
+PINS = ('    // Written by `pixi run check` on this machine.\n'
+        '    "python.defaultInterpreterPath": "/home/me/c/.pixi/envs/default/bin/python",\n'
+        '\n'
+        '    // Written by `pixi run check` on this machine.\n'
+        '    "pixi-code.pixiExecutable": "/home/me/.pixi/bin/pixi",\n'
+        '\n')
+
+
+def pinned(settings: str) -> str:
+    """The published settings.json with this machine's two paths pinned into it."""
+    opening = settings.index("{\n") + len("{\n")
+    return settings[:opening] + PINS + settings[opening:]
+
+
+def pin_into(course: Path, settings: str = TEMPLATE[".vscode/settings.json"]) -> Path:
+    """A course folder whose settings.json has been through `pixi run check`."""
+    target = course / ".vscode" / "settings.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(pinned(settings))
+    return target
+
+
+def test_update_leaves_the_pinned_vscode_paths_alone(run, course, stopping_at_install):
+    """The published file cannot carry them, so it must not count as newer."""
+    settings = pin_into(course)
+    result = run("update")
+    assert "pixi-code.pixiExecutable" in settings.read_text()
+    assert not settings.with_name("settings.json.backup").exists()
+    assert ".vscode/settings.json" not in result.output.split("Installing")[0]
+
+
+def test_update_still_replaces_the_settings_when_the_website_changes_them(
+        run, course, site, stopping_at_install):
+    """Stripping the pins for the comparison must not hide a real change."""
+    settings = pin_into(course)
+    site.joinpath(f"{ROOT}.zip").write_bytes(zip_bytes(
+        {**TEMPLATE, ".vscode/settings.json": '{\n    // new this term\n}\n'}))
+    run("update")
+    assert "new this term" in settings.read_text()
+    assert "pixi-code.pixiExecutable" in (
+        settings.with_name("settings.json.backup").read_text())
+
+
+# --- handing the last two steps back to the course folder ------------------- #
+
+class FakePixi:
+    """A pixi that records what it was asked to do instead of doing it."""
+
+    def __init__(self):
+        self.calls: list[list[str]] = []
+        self.codes: dict[tuple[str, ...], int] = {}
+
+    def fail(self, *words: str, code: int = 1) -> None:
+        self.codes[words] = code
+
+    def run(self, command, **kwargs) -> subprocess.CompletedProcess:
+        words = tuple(command[1:])              # everything after the pixi path
+        self.calls.append(list(words))
+        return subprocess.CompletedProcess(command, self.codes.get(words, 0))
+
+
+@pytest.fixture
+def pixi(monkeypatch) -> FakePixi:
+    monkeypatch.setenv("IM_NO_UPDATE_CHECK", "1")   # no version check in the way
+    fake = FakePixi()
+    monkeypatch.setattr(environment.shutil, "which",
+                        lambda name: "/somewhere/pixi" if name == "pixi" else None)
+    monkeypatch.setattr(environment.subprocess, "run", fake.run)
+    return fake
+
+
+def test_update_puts_the_kernel_and_the_vscode_paths_back(run, course, site, pixi):
+    """`pixi install` builds the environment; the task makes it usable."""
+    site.joinpath(f"{ROOT}.zip").write_bytes(zip_bytes(WITH_SETUP))
+    result = run("update")
+    assert pixi.calls == [["install"], ["run", "check"]]
+    assert result.exit_code == 0
+
+
+def test_update_sets_up_after_installing_and_not_before(run, course, site, pixi):
+    """The pin script writes the interpreter it is run by, so it needs the new one."""
+    site.joinpath(f"{ROOT}.zip").write_bytes(zip_bytes(WITH_SETUP))
+    run("update")
+    assert pixi.calls.index(["install"]) < pixi.calls.index(["run", "check"])
+
+
+def test_update_does_not_set_anything_up_when_the_install_failed(run, course, site,
+                                                                 pixi):
+    site.joinpath(f"{ROOT}.zip").write_bytes(zip_bytes(WITH_SETUP))
+    pixi.fail("install")
+    result = run("update")
+    assert pixi.calls == [["install"]]
+    assert result.exit_code == 1
+
+
+def test_update_says_which_half_failed_when_the_setup_task_does(run, course, site,
+                                                               pixi):
+    """The refresh worked; saying otherwise sends a student to the wrong fault."""
+    site.joinpath(f"{ROOT}.zip").write_bytes(zip_bytes(WITH_SETUP))
+    pixi.fail("run", "check")
+    result = run("update")
+    assert "up to date" in result.output
+    assert "pixi run check` did not finish cleanly" in result.output
+    assert result.exit_code == 1
+
+
+def test_update_copes_with_a_course_folder_that_has_no_check_task(run, course, pixi):
+    """Dropping the task must not stop `im update` on the day it goes."""
+    result = run("update")                      # TEMPLATE's manifest defines none
+    assert pixi.calls == [["install"]]
+    assert "Run `im check` to confirm." in result.output
+    assert result.exit_code == 0
