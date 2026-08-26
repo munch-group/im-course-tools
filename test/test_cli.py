@@ -29,12 +29,13 @@ def notebook_bytes(title: str) -> str:
     })
 
 
-# The course folder as the website publishes it: the six files `im update`
+# The course folder as the website publishes it: the seven files `im update`
 # keeps current, and two more that it must never touch.
 TEMPLATE = {
     "pixi.toml": "[workspace]\nname = 'instructing-machines'\n",
     "pixi.lock": "version: 6\n",
     ".pin_pixi_path.py": "# tell VS Code where pixi is\n",
+    ".pin_shell_path.py": "# tell the terminal where pixi is\n",
     ".gitignore": ".pixi/\n__pycache__/\n",
     ".vscode/settings.json": '{\n    // the course settings\n}\n',
     ".vscode/extensions.json": '{\n    "recommendations": []\n}\n',
@@ -230,7 +231,7 @@ def test_update_replaces_an_old_file_and_keeps_what_was_there(run, course,
 def test_update_brings_the_configs_and_the_script_too(run, course, stopping_at_install):
     """The whole point: a fix to any of these used to reach nobody."""
     run("update")
-    for name in (".gitignore", ".pin_pixi_path.py",
+    for name in (".gitignore", ".pin_pixi_path.py", ".pin_shell_path.py",
                  ".vscode/settings.json", ".vscode/extensions.json"):
         assert course.joinpath(*name.split("/")).read_text() == TEMPLATE[name]
 
@@ -251,7 +252,7 @@ def test_update_says_so_when_there_was_nothing_to_do(run, course, stopping_at_in
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text)
     result = run("update")
-    assert "All 6 of your course folder's files were already up to date." in result.output
+    assert "All 7 of your course folder's files were already up to date." in result.output
     assert not list(course.rglob("*.backup"))
 
 

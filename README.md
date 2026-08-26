@@ -32,7 +32,7 @@ Nothing ever overwrites a student's work.
 - A project zip is checked before it is unpacked: every entry must live inside
   the project's own folder, so an archive naming `../../somewhere` writes
   nothing.
-- `im update` replaces only the six files in the course folder that belong to
+- `im update` replaces only the seven files in the course folder that belong to
   the course rather than to the student, and only the ones that actually differ
   from what the website is publishing, keeping a `.backup` of each one it does
   replace.
@@ -43,8 +43,8 @@ happens to be, so `im get` works two subfolders deep.
 ## Keeping the course folder current
 
 The folder a student downloads in week one is not only their work. It is also
-the environment pixi builds, the tasks `pixi run` offers, the script that tells
-VS Code where pixi lives, and VS Code's own settings — none of which they have
+the environment pixi builds, the tasks `pixi run` offers, the two scripts that
+tell VS Code and the terminal where pixi lives, and VS Code's own settings — none of which they have
 any reason to maintain, and every one of which is somewhere a fix eventually
 has to reach. Until `im update` covered them, the only way to deliver one was
 to ask a hundred people to download the folder again and move their work
@@ -58,6 +58,7 @@ student starting today would download — and brings these up to date:
 | `pixi.toml` | the environment, and the `pixi run` tasks |
 | `pixi.lock` | the exact versions everyone else has |
 | `.pin_pixi_path.py` | what tells VS Code where pixi lives |
+| `.pin_shell_path.py` | what tells your terminal where pixi lives |
 | `.gitignore` | what git is to leave out |
 | `.vscode/settings.json` | how VS Code finds the course Python |
 | `.vscode/extensions.json` | the extensions the course asks for |

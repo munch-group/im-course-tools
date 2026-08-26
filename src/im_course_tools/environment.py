@@ -59,8 +59,8 @@ SETTINGS = ".vscode/settings.json"
 
 # The files inside it that `im update` keeps current. Every one of them is
 # course plumbing rather than anybody's work: the environment pixi builds from,
-# the tasks `pixi run` offers, the script that tells VS Code where pixi is, and
-# the editor's own settings.
+# the tasks `pixi run` offers, the two scripts that tell VS Code and the terminal
+# where pixi is, and the editor's own settings.
 #
 # The same download also holds the week-one notebooks, the data the chapters
 # read, and nothing else a student has written. Those are deliberately not in
@@ -70,13 +70,14 @@ FILES = (
     "pixi.toml",
     "pixi.lock",
     ".pin_pixi_path.py",
+    ".pin_shell_path.py",
     ".gitignore",
     SETTINGS,
     ".vscode/extensions.json",
 )
 
 # The two without which there is no environment at all. A download missing one
-# of them is a broken build and worth stopping for. The other four are taken
+# of them is a broken build and worth stopping for. The other five are taken
 # when they are there and passed over when they are not, so that dropping one
 # from the course folder does not stop `im update` working on the day it goes.
 ESSENTIAL = ("pixi.toml", "pixi.lock")
