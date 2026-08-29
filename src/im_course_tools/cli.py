@@ -1,11 +1,17 @@
 """The `im` command: the one terminal tool the course asks students to learn.
 
-    im check                 is my environment working?
-    im doctor                why is it not working?
+    im doctor                why is my setup not working?
     im get iteration         a chapter notebook
     im get alignmentproject  a whole project
     im get                   everything on offer
     im update                refresh the course folder from the website
+
+"Is my environment working?" is deliberately not on that list. It is answered by
+`pixi run check`, which runs the course folder's own .check_env.py, because a
+check that arrives inside the environment cannot say whether installing that
+environment worked. An `im check` in front of it would add nothing: `pixi global
+install` puts `im` beside the pixi binary, so the lost PATH that stops `pixi run
+check` stops `im` too.
 
 Every command that writes something writes it into the course folder, found by
 walking up from wherever the student happens to be, and none of them ever
@@ -63,12 +69,6 @@ def main() -> None:
     # Asked in the background and said at the end, so that no command waits on
     # it. A fix only reaches a student who knows there is one.
     release.announce_later(click.echo)
-
-
-@main.command()
-def check() -> None:
-    """Check that the course environment is complete."""
-    raise SystemExit(environment.check(click.echo))
 
 
 @main.command()

@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -43,26 +44,50 @@ SECURITY = "Security software"
 INTERNET = "Internet access"
 EDITOR = "VS Code"
 
-# Where pixi puts the environment it builds from pixi.toml.
-ENV_PATH = (".pixi", "envs", "default")
+# Where pixi puts the environment it builds from pixi.toml. Taken from
+# environment.py rather than written twice, because the course folder's own
+# .check_env.py has to agree with this one about where an environment lives.
+ENV_PATH = environment.ENV_PATH
 
 # The file pixi writes inside that environment naming the manifest it was built
 # from. It is written at install time and never afterwards, so it still names
 # the old folder once the folder has been moved.
 ENV_RECORD = ("conda-meta", "pixi")
 
-# Everything `im check` insists on, plus the one package that is not needed to
-# import anything but without which a notebook cannot run at all.
-PACKAGES = list(environment.REQUIRED) + [("ipykernel", "ipykernel")]
+# What to ask for when the course folder's pixi.toml cannot be read. Normally
+# the manifest itself is the list, the same one .check_env.py reads, so that a
+# widget added to the course is known here without anything being told.
+PACKAGES = list(environment.REQUIRED)
+
+# The sections of pixi.toml that name something the environment should contain,
+# matched exactly so that `[target.win-64.dependencies]` is passed over: a
+# package another platform needs is not missing from this one.
+PACKAGE_SECTIONS = ("dependencies", "pypi-dependencies")
+
+SECTION_HEADING = re.compile(r"^\[([^]]+)]")
+MANIFEST_ENTRY = re.compile(r"^([A-Za-z0-9._-]+)\s*=")
+
+# Packages whose import name is not their manifest name with the dashes turned
+# into underscores. Kept in step with the same map in .check_env.py.
+IMPORT_NAMES = {"biopython": "Bio"}
 
 # Run inside the course environment's own Python, so the answer is about that
 # environment and not about whichever Python happens to be running `im`.
+#
+# A name that will not import is looked for as a program before it is called
+# missing. Not everything a manifest asks for is importable: `quarto` is the
+# command-line tool the Quarto extension calls, and `python` is the interpreter
+# itself. Both arrive as programs in the environment's own bin folder.
 PACKAGE_PROBE = """
-import sys
+import os, shutil, sys
+where = os.pathsep.join([os.path.join(sys.prefix, d) for d in ("bin", "Scripts")])
 for module, name in %r:
     try:
         __import__(module)
+        continue
     except Exception:
+        pass
+    if shutil.which(name, path=where) is None:
         sys.stdout.write(name + "\\n")
 """
 
@@ -680,9 +705,43 @@ def execution_policy() -> Policy | None:
     return Policy(lines[0], here[1] if here else None, lasting, lasting_scope)
 
 
-def missing_packages(python: Path, timeout: float = 120.0) -> list[str] | None:
-    """The course packages that this Python cannot import, or None if it would not say."""
-    output = run_briefly([python, "-c", PACKAGE_PROBE % (PACKAGES,)], timeout)
+def manifest_packages(manifest: Path) -> list[tuple[str, str]] | None:
+    """What a pixi.toml asks for, as (import name, what to call it) pairs.
+
+    Read line by line rather than parsed as TOML, because `im` runs on whatever
+    Python it was installed onto and the parser for that arrived in 3.11. What
+    it is reading is a manifest the course publishes itself, where a dependency
+    is one line and its name is whatever stands before the first `=`, so the
+    cheap way of reading it is also an accurate one.
+    """
+    try:
+        text = manifest.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    found: list[str] = []
+    section = None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        heading = SECTION_HEADING.match(line)
+        if heading:
+            section = heading.group(1).strip()
+            continue
+        entry = MANIFEST_ENTRY.match(line)
+        if section in PACKAGE_SECTIONS and entry:
+            found.append(entry.group(1))
+    names = list(dict.fromkeys(found))
+    if not names:
+        return None
+    return [(IMPORT_NAMES.get(name, name.replace("-", "_")), name) for name in names]
+
+
+def missing_packages(python: Path, packages=None,
+                     timeout: float = 120.0) -> list[str] | None:
+    """The course packages that this Python does not have, or None if it would not say."""
+    wanted = PACKAGES if packages is None else packages
+    output = run_briefly([python, "-c", PACKAGE_PROBE % (wanted,)], timeout)
     if output is None:
         return None
     return [line.strip() for line in output.splitlines() if line.strip()]
@@ -1456,7 +1515,7 @@ def scripts_finding(ctx: Context) -> Finding | None:
             "",
             *vscode,
             "",
-            "`pixi run im check` works from anywhere, PowerShell included, because",
+            "`pixi run check` works from anywhere, PowerShell included, because",
             "it starts no shell. If this is a university laptop, its IT support",
             "can lift the rule.",
         ]
@@ -1632,7 +1691,12 @@ def packages_check(ctx: Context) -> Finding | None:
     """Whether the course environment can import everything the course uses."""
     if ctx.env_python is None:
         return None
-    missing = missing_packages(ctx.env_python)
+    # The folder's own manifest is the list, so this and the `pixi run check` a
+    # student is told to run are asking for the same thing. Only when it cannot
+    # be read does this fall back to the copy kept here, which can be out of date
+    # in a way the manifest never is.
+    wanted = manifest_packages(ctx.folder / MARKER) if ctx.folder else None
+    missing = missing_packages(ctx.env_python, wanted)
     if missing is None:
         return Finding(WARN, ENVIRONMENT, "Could not ask the environment which packages it has",
                        [f"{ctx.env_python} did not answer"], [
@@ -1663,27 +1727,25 @@ def interpreter_check(ctx: Context) -> Finding | None:
         inside = False
     if inside:
         return Finding(OK, ENVIRONMENT, "`im` is running from inside the course environment")
-    # Not a warning. It opens by saying that nothing is wrong, which is the
-    # mark of something that should not be interrupting anybody: a globally
-    # installed `im` is what the course recommends, and this fires for every
-    # student who took that advice. What it has to say is worth keeping and
-    # not worth a line on a stuck student's screen, so --verbose and the
-    # report keep it and the screen does not.
+    # Not a warning, and nothing to go and do. A globally installed `im` is what
+    # the course recommends, and this fires for every student who took that
+    # advice. It is recorded because knowing which `im` answered is worth having
+    # in a report, and kept off the screen because a stuck student reading past
+    # it is a student not reading the line underneath.
+    #
+    # It used to say more. There was an `im check` that could only see the
+    # packages in the Python running it, so a globally installed one reported
+    # the whole course missing and this had to send the student back through
+    # pixi. That command is gone: the packages are checked by the course
+    # folder's own .check_env.py, which `pixi run check` runs on the folder's
+    # own Python, so where `im` was installed cannot change the answer.
     return Finding(OK, ENVIRONMENT, "`im` is running from outside the course environment",
                    [f"This `im` runs on {sys.executable}", f"The environment is {env}"], [
-                       "That is fine for `im doctor`, which looks at your course",
-                       "environment directly rather than from inside it. It is not fine",
-                       "for `im check`, which can only see the packages in the Python it",
-                       "is itself running on, and would report things missing that are",
-                       "installed a folder away.",
-                       "",
-                       "Run that one through pixi, from your course folder:",
-                       "",
-                       "    pixi --quiet run im check",
-                   ], fix=["Nothing is wrong here, but run `im check` through pixi so it",
-                           "sees the course environment:",
-                           "",
-                           "    pixi --quiet run im check"])
+                       "That is what the course recommends and it changes nothing here.",
+                       "`im doctor` looks at your course environment directly rather than",
+                       "from inside it, so it answers about that environment wherever `im`",
+                       "itself was installed.",
+                   ])
 
 
 def activation_check(ctx: Context) -> Finding | None:
@@ -1723,7 +1785,7 @@ def activation_check(ctx: Context) -> Finding | None:
                 "The prompt changes while you are in it, and `exit` leaves again. Or",
                 "run a single command through pixi without stepping in at all:",
                 "",
-                "    pixi --quiet run im check"]
+                "    pixi --quiet run check"]
 
     step = into("Step into it. From your course folder, or anywhere inside it:")
     instead = "Leave it and step into the course one, from your course folder:"

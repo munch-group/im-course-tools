@@ -4,8 +4,7 @@ The `im` command for the [Instructing Machines](https://munch-group.org/instruct
 course: a small, pure-Python CLI that students run from their course folder.
 
 ```bash
-im check                 # is my environment working?
-im doctor                # why is it not working?
+im doctor                # why is my setup not working?
 im get iteration         # download a chapter notebook
 im get alignmentproject  # download a whole project
 im get                   # everything on offer
@@ -14,11 +13,21 @@ im update                # refresh the course folder from the website
 
 ## Why it is a package
 
-The course folder students download holds their own work and nothing else. The
-four commands used to be four Python files copied into that folder, which put
-code students had no reason to read next to the notebooks they did, and left no
-way to fix a bug for a hundred people already holding a copy. Here they travel
-with the environment instead: a fix reaches everyone through a release.
+The course folder students download holds their own work and nothing else. These
+commands used to be Python files copied into that folder, which put code students
+had no reason to read next to the notebooks they did, and left no way to fix a
+bug for a hundred people already holding a copy. Here they travel with the
+environment instead: a fix reaches everyone through a release.
+
+One check went the other way. "Is my environment working?" is answered by `pixi
+run check`, which runs `.check_env.py` from the course folder, because a check
+that arrives inside the environment cannot say whether installing that
+environment worked: when the install went wrong, the check went wrong with it,
+and the answer is `im: command not found`. There is no `im check` in front of it,
+because `pixi global install` puts `im` in the same folder as the pixi binary —
+the lost PATH that stops `pixi run check` stops `im` too, so a wrapper could
+never answer in a case the script could not. `im update` keeps that file current
+along with everything else in the folder, so a fix still reaches everyone.
 
 ## What the commands guarantee
 
@@ -32,7 +41,7 @@ Nothing ever overwrites a student's work.
 - A project zip is checked before it is unpacked: every entry must live inside
   the project's own folder, so an archive naming `../../somewhere` writes
   nothing.
-- `im update` replaces only the seven files in the course folder that belong to
+- `im update` replaces only the nine files in the course folder that belong to
   the course rather than to the student, and only the ones that actually differ
   from what the website is publishing, keeping a `.backup` of each one it does
   replace.
@@ -84,22 +93,29 @@ changing: `im update` is where a student is sent when the environment is
 broken, and skipping the install because the files were already right would
 turn them away in exactly the case the command exists for.
 
+pixi is looked for on PATH and then where its installer puts it. "pixi is not on
+PATH" is one of the faults this command is run to repair, and it used to be the
+one fault that stopped the repair: giving up sent a student off to type `pixi
+install` in a terminal that had just proved it could not find pixi. Running it by
+its full path builds the environment anyway, and the handback below is what puts
+pixi on PATH for the terminals opened afterwards.
+
 `pixi run check` runs after that, for a related reason: building the environment
 is not the same as making it usable. The notebook kernel and the two VS Code
 paths above are `pixi run` tasks rather than packages, and the refresh has just
 undone both — the kernel lives inside the environment prefix pixi may have
 rebuilt from the new lock file, and the paths live in the settings.json that may
 have just been replaced with the published copy. That task puts both back, and
-ends by running `im check`, which is what `im update` used to finish by asking
-the student to go and do themselves. A course folder whose `pixi.toml` does not
-define it is left alone rather than failed on.
+ends by checking the environment, which is what `im update` used to finish by
+asking the student to go and do themselves. A course folder whose `pixi.toml`
+does not define it is left alone rather than failed on.
 
 ## When something is wrong
 
-`im check` answers one question: are the packages there. `im doctor` answers the
-question a student actually has, which is why they are not, and it is the one
-command that runs anywhere rather than only in the course folder — because
-being in the wrong folder is one of the things it is there to notice.
+`pixi run check` answers one question: are the packages there. `im doctor`
+answers the question a student actually has, which is why they are not, and it is
+the one command that runs anywhere rather than only in the course folder —
+because being in the wrong folder is one of the things it is there to notice.
 
 It reads the machine and changes nothing on it, so it is always safe to tell a
 hundred people to run it. The one thing it downloads goes into a temporary
@@ -273,14 +289,17 @@ what is broken, so it is worth having a copy that does not depend on one:
 pixi global install -c conda-forge -c munch-group im-course-tools
 ```
 
-A globally installed `im` notices that it is the global one and says so, since
-`im check` can only see the packages in the Python it is itself running on and
-would otherwise report a working environment as empty.
+A globally installed `im` notices that it is the global one and records it in
+the report, so that whoever reads it knows which `im` answered. It changes
+nothing else: `im doctor` looks at the course environment from outside rather
+than from inside it, so where `im` was installed cannot change what it finds.
 
 ## Development
 
 ```bash
-pixi run install-dev     # editable install into the pixi environment
+pixi run install-dev     # install the working tree into the pixi environment
+                         # (a plain install, not editable: rerun it after
+                         # every source edit or the tests run the old copy)
 pixi run test            # the test suite
 ```
 

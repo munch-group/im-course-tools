@@ -344,16 +344,16 @@ def test_anywhere_else_it_is_the_script_beside_this_interpreter(monkeypatch, tmp
     (tmp_path / "bin").mkdir()
     (tmp_path / "bin" / "im").write_text("")
     monkeypatch.setattr(release.sys, "executable", str(tmp_path / "bin" / "python"))
-    command, folder = release.rerun_command(Install(PIP, "0.1.3", Path("/x")), ["check"])
-    assert command == [str(tmp_path / "bin" / "im"), "check"]
+    command, folder = release.rerun_command(Install(PIP, "0.1.3", Path("/x")), ["doctor"])
+    assert command == [str(tmp_path / "bin" / "im"), "doctor"]
     assert folder is None
 
 
 def test_without_a_script_the_interpreter_is_asked_for_it_by_name(monkeypatch, tmp_path,
                                                                   tools):
     monkeypatch.setattr(release.sys, "executable", str(tmp_path / "python"))
-    command, _ = release.rerun_command(Install(PIP, "0.1.3", Path("/x")), ["check"])
-    assert command == [str(tmp_path / "python"), "-m", "im_course_tools", "check"]
+    command, _ = release.rerun_command(Install(PIP, "0.1.3", Path("/x")), ["doctor"])
+    assert command == [str(tmp_path / "python"), "-m", "im_course_tools", "doctor"]
 
 
 def test_a_new_one_that_will_not_start_says_so_rather_than_pretending(upgradable,

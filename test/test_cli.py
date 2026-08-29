@@ -29,13 +29,15 @@ def notebook_bytes(title: str) -> str:
     })
 
 
-# The course folder as the website publishes it: the seven files `im update`
+# The course folder as the website publishes it: the nine files `im update`
 # keeps current, and two more that it must never touch.
 TEMPLATE = {
     "pixi.toml": "[workspace]\nname = 'instructing-machines'\n",
     "pixi.lock": "version: 6\n",
+    ".check_env.py": "# say whether this environment is complete\n",
     ".pin_pixi_path.py": "# tell VS Code where pixi is\n",
     ".pin_shell_path.py": "# tell the terminal where pixi is\n",
+    ".pin_shell_path.sh": "# the same, in shell\n",
     ".gitignore": ".pixi/\n__pycache__/\n",
     ".vscode/settings.json": '{\n    // the course settings\n}\n',
     ".vscode/extensions.json": '{\n    "recommendations": []\n}\n',
@@ -203,17 +205,27 @@ def test_the_course_folder_is_found_from_a_subfolder(run, course, monkeypatch):
 
 # --- the environment ------------------------------------------------------- #
 
-def test_check_names_what_is_missing(run):
+def test_there_is_no_check_command(run):
+    """It was a wrapper that could never answer where `pixi run check` could not.
+
+    `pixi global install` puts `im` in the same folder as the pixi binary, so
+    the lost PATH that stops one stops the other. The course folder's own
+    .check_env.py is the check, and `pixi run check` is what runs it.
+    """
     result = run("check")
-    # this test environment has none of the course widgets installed
-    assert result.exit_code == 1
-    assert "steps-widget" in result.output
+    assert result.exit_code != 0
+    assert "check" not in run("--help").output.split("Commands:")[1]
 
 
 @pytest.fixture
 def stopping_at_install(monkeypatch):
-    """`im update` up to the point where it would hand over to pixi."""
+    """`im update` up to the point where it would hand over to pixi.
+
+    Both places it looks are emptied, not just PATH: it now falls back to where
+    the installer puts pixi, and the machine running these tests has one there.
+    """
     monkeypatch.setenv("PATH", "/nonexistent")
+    monkeypatch.setattr(environment, "pixi_locations", lambda *a, **k: [])
     return monkeypatch
 
 
@@ -252,7 +264,10 @@ def test_update_says_so_when_there_was_nothing_to_do(run, course, stopping_at_in
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text)
     result = run("update")
-    assert "All 7 of your course folder's files were already up to date." in result.output
+    # Counted from FILES rather than written down, so that adding a file to the
+    # course folder does not leave this test asserting last term's number.
+    assert (f"All {len(environment.FILES)} of your course folder's files were "
+            "already up to date.") in result.output
     assert not list(course.rglob("*.backup"))
 
 
@@ -331,7 +346,7 @@ def test_update_takes_the_folder_whatever_it_unpacks_into(run, course, site,
 # The manifest as the course folder really ships it, with the task `im update`
 # hands the kernel and the VS Code paths to once the environment is built.
 WITH_SETUP = {**TEMPLATE,
-              "pixi.toml": TEMPLATE["pixi.toml"] + '\n[tasks]\ncheck = "im check"\n'}
+              "pixi.toml": TEMPLATE["pixi.toml"] + '\n[tasks]\ncheck = "python .check_env.py"\n'}
 
 # What `pixi run check` puts into .vscode/settings.json on one machine, laid out
 # the way .pin_pixi_path.py lays it out: a comment, the setting, a blank line.
@@ -343,25 +358,68 @@ PINS = ('    // Written by `pixi run check` on this machine.\n'
         '\n')
 
 
-def pinned(settings: str) -> str:
+def pinned(settings: str, pins: str = "") -> str:
     """The published settings.json with this machine's two paths pinned into it."""
     opening = settings.index("{\n") + len("{\n")
-    return settings[:opening] + PINS + settings[opening:]
+    return settings[:opening] + (pins or PINS) + settings[opening:]
 
 
-def pin_into(course: Path, settings: str = TEMPLATE[".vscode/settings.json"]) -> Path:
+def pin_into(course: Path, settings: str = TEMPLATE[".vscode/settings.json"],
+             pins: str = "") -> Path:
     """A course folder whose settings.json has been through `pixi run check`."""
     target = course / ".vscode" / "settings.json"
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(pinned(settings))
+    target.write_text(pinned(settings, pins))
     return target
 
 
-def test_update_leaves_the_pinned_vscode_paths_alone(run, course, stopping_at_install):
-    """The published file cannot carry them, so it must not count as newer."""
-    settings = pin_into(course)
+def test_update_uses_the_installers_pixi_when_this_terminal_cannot_see_one(
+        run, course, site, monkeypatch, tmp_path):
+    """The fault `im update` is run to fix must not be the fault that stops it.
+
+    A terminal that cannot find pixi cannot run `pixi install` either, so giving
+    up here would send the student off to type the very command that just
+    failed. The handback at the end is what then puts pixi on PATH.
+    """
+    monkeypatch.setenv("IM_NO_UPDATE_CHECK", "1")
+    site.joinpath(f"{ROOT}.zip").write_bytes(zip_bytes(WITH_SETUP))
+    installed = tmp_path / ".pixi" / "bin" / "pixi"
+    installed.parent.mkdir(parents=True)
+    installed.write_text("#!/bin/sh\n")
+    fake = FakePixi()
+    monkeypatch.setattr(environment.shutil, "which", lambda name: None)
+    monkeypatch.setattr(environment, "pixi_locations", lambda *a, **k: [installed])
+    monkeypatch.setattr(environment.subprocess, "run", fake.run)
+
     result = run("update")
-    assert "pixi-code.pixiExecutable" in settings.read_text()
+    assert result.exit_code == 0
+    assert "cannot see pixi" in result.output
+    # Built, and then handed back to the task that runs .pin_shell_path.sh.
+    assert fake.calls == [["install"], ["run", "check"]]
+
+
+def test_update_gives_up_only_when_pixi_is_nowhere(run, course, stopping_at_install):
+    result = run("update")
+    assert result.exit_code == 1
+    assert "where its installer puts it" in result.output
+
+
+@pytest.mark.parametrize("setting", [
+    "im-pixi-vscode.pixiExecutable",                # what .pin_pixi_path.py writes
+    "pixi-code.pixiExecutable",                     # what it wrote before the
+])                                                  # pixi extension was replaced
+def test_update_leaves_the_pinned_vscode_paths_alone(run, course, setting,
+                                                     stopping_at_install):
+    """The published file cannot carry them, so it must not count as newer.
+
+    Both spellings, because renaming the setting without saying so here is what
+    would hand every student a replaced settings.json and a fresh .backup on
+    every single run, for ever.
+    """
+    settings = pin_into(course, pins=PINS.replace(
+        "pixi-code.pixiExecutable", setting))
+    result = run("update")
+    assert setting in settings.read_text()
     assert not settings.with_name("settings.json.backup").exists()
     assert ".vscode/settings.json" not in result.output.split("Installing")[0]
 
@@ -445,5 +503,5 @@ def test_update_copes_with_a_course_folder_that_has_no_check_task(run, course, p
     """Dropping the task must not stop `im update` on the day it goes."""
     result = run("update")                      # TEMPLATE's manifest defines none
     assert pixi.calls == [["install"]]
-    assert "Run `im check` to confirm." in result.output
+    assert "run `im doctor`" in result.output
     assert result.exit_code == 0

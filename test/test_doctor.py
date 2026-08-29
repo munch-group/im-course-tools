@@ -10,6 +10,7 @@ ones that cannot be arranged on demand.
 import json
 import platform
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -372,6 +373,42 @@ def test_nothing_is_said_about_an_environment_that_is_not_there(here, course):
     assert checks.moved_check(here) is None
 
 
+def test_the_packages_asked_for_are_the_ones_the_manifest_names(course):
+    """So that a widget added to the course is known here without being told."""
+    (course / "pixi.toml").write_text(
+        "[workspace]\nname = 'instructing-machines'\n"
+        "\n[dependencies]\npython = '>=3.13'\nbiopython = '>=1.88'\n"
+        "new-widget = '>=1'\n"
+        "\n[pypi-dependencies]\nvscodenb = '>=1'\n"
+        "\n[target.win-64.dependencies]\nwindows-only = '*'\n"
+        "\n[tasks]\ncheck = 'python .check_env.py'\n")
+    assert checks.manifest_packages(course / "pixi.toml") == [
+        ("python", "python"),
+        ("Bio", "biopython"),
+        ("new_widget", "new-widget"),
+        ("vscodenb", "vscodenb"),
+    ]
+
+
+def test_a_manifest_that_cannot_be_read_falls_back_rather_than_asking_for_nothing(course):
+    assert checks.manifest_packages(course / "not-here.toml") is None
+    (course / "empty.toml").write_text("[workspace]\nname = 'x'\n")
+    assert checks.manifest_packages(course / "empty.toml") is None
+
+
+def test_a_name_that_is_a_program_rather_than_a_module_is_not_missing(tmp_path):
+    """quarto is a command-line tool, and python is the interpreter itself."""
+    prefix = tmp_path / "env"
+    (prefix / "bin").mkdir(parents=True)
+    (prefix / "bin" / "quarto").write_text("#!/bin/sh\n")
+    (prefix / "bin" / "quarto").chmod(0o755)
+    probe = checks.PACKAGE_PROBE % ([("quarto", "quarto"), ("nope", "nope")],)
+    output = subprocess.run(
+        [sys.executable, "-c", f"import sys; sys.prefix = {str(prefix)!r}\n" + probe],
+        capture_output=True, text=True)
+    assert output.stdout.split() == ["nope"]
+
+
 def test_packages_missing_from_the_environment_are_named(here, course, monkeypatch):
     here.env_python = course / "python"
     monkeypatch.setattr(checks, "run_briefly", lambda *a, **k: "steps-widget\nim-pytest\n")
@@ -392,7 +429,10 @@ def test_a_globally_installed_im_says_so_without_interrupting_anybody(here, cour
     here.folder, here.env_python = course, course / "python"
     finding = checks.interpreter_check(here)
     assert finding.status == OK
-    assert "pixi --quiet run im check" in written([finding])
+    assert finding.fix == []
+    # It used to send the student back through pixi, because `im check` could
+    # only see the Python running it. It hands the question to the folder now.
+    assert "pixi --quiet run im check" not in written([finding])
 
 
 # --- the terminal the student is typing into -------------------------------- #
@@ -817,7 +857,7 @@ def test_nothing_activated_is_said_plainly_with_how_to_activate(here, course, mo
     assert finding.status == WARN
     said = written([finding])
     assert "pixi shell" in said
-    assert "pixi --quiet run im check" in said
+    assert "pixi --quiet run check" in said
 
 
 def test_a_conda_environment_in_the_way_names_itself(here, course, monkeypatch):

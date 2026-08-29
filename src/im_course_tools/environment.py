@@ -1,9 +1,22 @@
 """Checking the course environment, and refreshing it from the website.
 
-Both of these used to be a loose script in the student's own folder, which
-meant a fix could only reach them by asking a hundred people to download a file
-again. Here they travel with the package instead: releasing im-course-tools updates
-them.
+Refreshing travels with the package: it used to be a loose script in the
+student's own folder, which meant a fix could only reach them by asking a
+hundred people to download a file again, and releasing im-course-tools updates
+it instead.
+
+Checking went the other way and left this module entirely, and the day it is
+used says why. `pixi run check` is what a student types straight after `pixi
+install`, to be told whether that worked. A check that arrives inside the
+environment cannot answer that question: when the install went wrong, the check
+went wrong with it, and the answer is `im: command not found`. So checking is
+.check_env.py in the course folder, run by `pixi run check`, needing nothing but
+a Python. There is no `im check` wrapping it, because `pixi global install` puts
+`im` in the same folder as the pixi binary itself: the lost PATH that stops
+`pixi run check` stops any `im` command with it, so a wrapper could never answer
+in a case the folder's own script could not. The objection that put checking
+here in the first place is answered by `im update`, which keeps that file
+current along with everything else in the folder.
 
 Refreshing means the whole of the course folder's own setup and not just the
 environment: the tasks `pixi run` offers, the script that tells VS Code where
@@ -25,25 +38,50 @@ import io
 import re
 import shutil
 import subprocess
-import sys
 import zipfile
 from pathlib import Path
 
 from .course import fetch_bytes, url_for
+from .security import pixi_locations
 
-# What `im check` insists on. The pair is (import name, what to call it), so a
-# missing package can be reported by the name a student would recognise. Adding
-# a widget to the course means adding it here and releasing im-course-tools.
+# Where pixi puts the environment it builds from pixi.toml.
+ENV_PATH = (".pixi", "envs", "default")
+
+# The course folder's own answer to "is this environment complete", and the only
+# thing that answers it. `pixi run check` runs it; it reads the folder's
+# pixi.toml and reports what is not there, so the list of what the course needs
+# is the manifest itself and cannot drift from it. Named here because `im
+# update` is what keeps it current.
+CHECK_SCRIPT = ".check_env.py"
+
+# What `im doctor` asks for when a course folder's pixi.toml cannot be read at
+# all. The pair is (import name, what to call it), so a missing package can be
+# reported by the name a student would recognise.
+#
+# This is a copy of a list that lives somewhere else, and the whole reason the
+# script above reads the manifest is that such a copy goes stale: this one had
+# drifted far enough from pixi.toml to report a complete environment on a
+# machine with no matplotlib and no biopython. Nothing new should be added here.
+# Add it to the course's pixi.toml, which is the list that is actually read.
 REQUIRED = [
-    ("steps_widget", "steps-widget"),
-    ("puzzle_widget", "puzzle-widget"),
-    ("codelens_widget", "codelens-widget"),
-    ("turtle_widget", "turtle-widget"),
-    ("sandbox_widget", "sandbox-widget"),
-    ("iplot_widget", "iplot-widget"),
-    ("im_pytest", "im-pytest"),
+    ("ipykernel", "ipykernel"),
+    ("ipywidgets", "ipywidgets"),
+    ("anywidget", "anywidget"),
+    ("jupyterlab", "jupyterlab"),
     ("pandas", "pandas"),
     ("seaborn", "seaborn"),
+    ("matplotlib", "matplotlib"),
+    ("pytest", "pytest"),
+    ("steps_widget", "steps-widget"),
+    ("sandbox_widget", "sandbox-widget"),
+    ("snippet_cast", "snippet-cast"),
+    ("iplot_widget", "iplot-widget"),
+    ("turtle_widget", "turtle-widget"),
+    ("puzzle_widget", "puzzle-widget"),
+    ("codelens_widget", "codelens-widget"),
+    ("im_pytest", "im-pytest"),
+    ("Bio", "biopython"),
+    ("cryptography", "cryptography"),
 ]
 
 # What `im update` reads the current versions out of: the course folder itself,
@@ -59,8 +97,14 @@ SETTINGS = ".vscode/settings.json"
 
 # The files inside it that `im update` keeps current. Every one of them is
 # course plumbing rather than anybody's work: the environment pixi builds from,
-# the tasks `pixi run` offers, the two scripts that tell VS Code and the terminal
-# where pixi is, and the editor's own settings.
+# the tasks `pixi run` offers, the scripts that tell VS Code and the terminal
+# where pixi is and that say whether the environment is complete, and the
+# editor's own settings.
+#
+# .check_env.py is in this list for the reason it exists at all. It sits in the
+# folder rather than in this package so that it still runs when the environment
+# is the thing that is broken, and everything that lives in the folder is a copy
+# a fix cannot reach on its own. This is how a fix reaches it.
 #
 # The same download also holds the week-one notebooks, the data the chapters
 # read, and nothing else a student has written. Those are deliberately not in
@@ -69,15 +113,17 @@ SETTINGS = ".vscode/settings.json"
 FILES = (
     "pixi.toml",
     "pixi.lock",
+    CHECK_SCRIPT,
     ".pin_pixi_path.py",
     ".pin_shell_path.py",
+    ".pin_shell_path.sh",
     ".gitignore",
     SETTINGS,
     ".vscode/extensions.json",
 )
 
 # The two without which there is no environment at all. A download missing one
-# of them is a broken build and worth stopping for. The other five are taken
+# of them is a broken build and worth stopping for. The others are taken
 # when they are there and passed over when they are not, so that dropping one
 # from the course folder does not stop `im update` working on the day it goes.
 ESSENTIAL = ("pixi.toml", "pixi.lock")
@@ -99,7 +145,16 @@ SANITY = {"pixi.toml": "[workspace]", "pixi.lock": "version:"}
 # stripped of its pins and left with a fresh .backup every single time. Taken
 # out of both sides first, what gets compared is the part the website is
 # actually publishing.
-LOCAL_SETTINGS = ("pixi-code.pixiExecutable", "python.defaultInterpreterPath")
+#
+# The pixi setting is named twice because the extension that reads it was
+# replaced: the course now recommends munch-group.im-pixi-vscode, and settings
+# are namespaced by the extension that owns them. A student who set the folder
+# up under the old one still has the old key sitting in their settings.json, and
+# leaving it out here would do to them exactly what naming only the old one did
+# to everybody — a file permanently out of date, replaced and backed up on every
+# single run. Both come out, so both are forgiven.
+LOCAL_SETTINGS = ("im-pixi-vscode.pixiExecutable", "pixi-code.pixiExecutable",
+                  "python.defaultInterpreterPath")
 
 PINNED = re.compile(
     r"(?:^[ \t]*//[^\n]*\n)*"                          # the comment above it
@@ -112,36 +167,13 @@ PINNED = re.compile(
 
 # The course folder's own name for "put this machine's setup right": it installs
 # the notebook kernel, writes the two settings above, and finishes by running
-# `im check`.
+# the folder's own .check_env.py.
 SETUP_TASK = "check"
 
 # Whether the manifest still defines that task. Looked for rather than assumed,
 # so that dropping it from the course folder does not stop `im update` working
 # on the day it goes — the same tolerance ESSENTIAL buys for the files.
 DEFINES_SETUP = re.compile(rf"^[ \t]*{SETUP_TASK}[ \t]*=", re.MULTILINE)
-
-
-def check(echo) -> int:
-    """Import everything the course needs, and say plainly what is missing."""
-    missing = []
-    for module, name in REQUIRED:
-        try:
-            __import__(module)
-        except ImportError:
-            missing.append(name)
-
-    if not missing:
-        echo(f"Everything is installed. Python {sys.version.split()[0]}")
-        return 0
-
-    echo("Your environment is missing:")
-    echo("")
-    for name in missing:
-        echo(f"    {name}")
-    echo("")
-    echo("Run `im update` to refresh the environment. If that does not fix it,")
-    echo("bring this message to class.")
-    return 1
 
 
 def single_root(archive: zipfile.ZipFile) -> str | None:
@@ -277,10 +309,23 @@ def update(folder: Path, echo) -> int:
     # skipped because the files were already right would turn it away at the
     # door in exactly the case it exists for.
     echo("\nInstalling. This may take a few minutes.\n")
-    pixi = shutil.which("pixi")
+
+    # PATH first, and then where the installer puts it whether or not this
+    # terminal has been told. "pixi is not on PATH" is one of the faults this
+    # command exists to repair, and it used to be the one fault that stopped the
+    # repair: giving up here sent a student off to type `pixi install` in a
+    # terminal that had just proved it cannot find pixi. Running it by its full
+    # path builds the environment anyway, and the `pixi run check` at the end
+    # runs .pin_shell_path.sh, which is what puts pixi on PATH for every
+    # terminal opened afterwards.
+    found = shutil.which("pixi")
+    pixi = Path(found) if found else next(iter(pixi_locations()), None)
     if pixi is None:
-        echo("Could not find pixi. Open a new terminal and run `pixi install` yourself.")
+        echo("Could not find pixi, on PATH or where its installer puts it.")
+        echo("Install it again from https://pixi.sh, then run `im update` again.")
         return 1
+    if found is None:
+        echo(f"This terminal cannot see pixi, so using the one at {pixi}.\n")
 
     result = subprocess.run([pixi, "install"], cwd=folder)
     if result.returncode != 0:
@@ -302,10 +347,14 @@ def update(folder: Path, echo) -> int:
     # exists to prevent.
     #
     # `pixi run check` is the course folder's own name for putting both back,
-    # and it ends by running `im check` — which is what this used to finish by
-    # asking the student to go and do themselves.
+    # and it ends by checking the environment — which is what this used to
+    # finish by asking the student to go and do themselves.
+    # No `check` task in the manifest that was just downloaded, so there is
+    # nothing to hand back to and nothing to send the student to either: the
+    # command that would put the kernel and the paths back is the one that is
+    # missing. `im doctor` is the one that always exists.
     if not DEFINES_SETUP.search(theirs["pixi.toml"].decode("utf-8", "replace")):
-        echo("\nDone. Run `im check` to confirm.")
+        echo("\nDone. If something still does not work, run `im doctor`.")
         return 0
 
     echo("\nSetting up the kernel and VS Code.\n")
