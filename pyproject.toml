@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "im-course-tools"
-version = "0.1.25"
+version = "0.1.26"
 description = "The `im` command for the Instructing Machines course"
 authors = [
     {name = "Kasper Munch", email = "kaspermunch@birc.au.dk"}
