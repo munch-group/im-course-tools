@@ -27,7 +27,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import environment, probe, release, security
+from . import editor, environment, probe, release, security
 from .course import MARKER, CourseFolderNotFound, base_url, course_folder
 
 OK, WARN, FAIL = "ok", "warn", "fail"
@@ -2251,7 +2251,14 @@ def vscode_check(ctx: Context) -> list[Finding]:
         str(Path.home() / "Applications" / "Visual Studio Code.app"),
     )]
     found = [place for place in places if place.exists()]
-    command = shutil.which("code")
+
+    # Not shutil.which alone. On macOS `code` is on PATH only for a student who
+    # ran "Shell Command: Install 'code' command in PATH" from the palette, and
+    # nothing in this course asks anyone to do that -- so on most of their
+    # machines the check below used to stop here and report nothing, on exactly
+    # the platform the extension trouble turned up on. editor.code_command
+    # falls back to the copy inside the application itself.
+    command = editor.code_command()
 
     if command is None and not found:
         return [Finding(WARN, EDITOR, "VS Code was not found where it usually installs", [], [
@@ -2265,18 +2272,38 @@ def vscode_check(ctx: Context) -> list[Finding]:
 
     if command is None:
         return [Finding(OK, EDITOR, "VS Code is installed",
-                        [str(found[0]),
-                         "The `code` command is not on PATH, so its extensions were not checked"])]
+                        [str(found[0]) if found else "somewhere this check cannot see",
+                         "Its command-line tool was not found, so its extensions were "
+                         "not checked"])]
 
     listed = run_briefly([command, "--list-extensions"], 30)
     if listed is None:
-        return [Finding(OK, EDITOR, "VS Code is installed", [command])]
+        return [Finding(OK, EDITOR, "VS Code is installed", [str(command)])]
 
     installed = {line.strip().lower() for line in listed.splitlines() if line.strip()}
+
+    findings = []
+
+    # An extension that breaks the course arrangement is worth saying before an
+    # extension that is merely missing: this one is already doing damage, and a
+    # student who has just been told the Run button says "command not found"
+    # should find that named here rather than have to guess.
+    clashing = [c for c in editor.conflicts(_published_conflicts(ctx))
+                if c.id.lower() in installed]
+    if clashing:
+        findings.append(Finding(
+            WARN, EDITOR, "VS Code has an extension that conflicts with the course setup",
+            [conflict.id for conflict in clashing],
+            [line for conflict in clashing for line in conflict.why.splitlines()] + [
+                "", "`im update` removes these and says what it did.",
+            ], fix=["Run `im update`, which removes it and says what it did."]))
+
     missing = [(key, name) for key, name in EXTENSIONS if key not in installed]
     if not missing:
-        return [Finding(OK, EDITOR, "VS Code is installed, with the Python and Jupyter extensions")]
-    return [Finding(WARN, EDITOR, "VS Code is missing an extension the course needs",
+        findings.append(Finding(
+            OK, EDITOR, "VS Code is installed, with the Python and Jupyter extensions"))
+        return findings
+    findings.append(Finding(WARN, EDITOR, "VS Code is missing an extension the course needs",
                     [name for _, name in missing], [
                         "Without these, VS Code opens a notebook but cannot run it, and the",
                         "kernel picker either stays empty or never finds your .pixi",
@@ -2284,7 +2311,24 @@ def vscode_check(ctx: Context) -> list[Finding]:
                         "",
                         *(f"    code --install-extension {key}" for key, _ in missing),
                     ], fix=[*(f"    code --install-extension {key}"
-                              for key, _ in missing)])]
+                              for key, _ in missing)]))
+    return findings
+
+
+def _published_conflicts(ctx: Context) -> bytes | None:
+    """The course folder's own list of conflicting extensions, if it is there.
+
+    `im doctor` reads the copy on disk rather than fetching one: it is the
+    command for a machine that may have no working network, and `im update`
+    keeps this file current whenever there is one.
+    """
+    folder = getattr(ctx, "folder", None)
+    if folder is None:
+        return None
+    try:
+        return (Path(folder) / editor.CONFLICTS_FILE).read_bytes()
+    except OSError:
+        return None
 
 
 # In the order a student should read them, which is also the order they run in:

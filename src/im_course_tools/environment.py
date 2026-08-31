@@ -41,6 +41,7 @@ import subprocess
 import zipfile
 from pathlib import Path
 
+from . import editor
 from .course import fetch_bytes, url_for
 from .security import pixi_locations
 
@@ -120,6 +121,7 @@ FILES = (
     ".gitignore",
     SETTINGS,
     ".vscode/extensions.json",
+    editor.CONFLICTS_FILE,
 )
 
 # The two without which there is no environment at all. A download missing one
@@ -303,6 +305,14 @@ def update(folder: Path, echo) -> int:
              f"already up to date.")
     elif current:
         echo(f"All {current} of your course folder's files were already up to date.")
+
+    # Extensions, before the install rather than after it, because this is the
+    # part a student is most likely to walk away from: `pixi install` can take
+    # minutes, and a message printed on the far side of it is a message read by
+    # fewer people. The list comes from the archive just downloaded rather than
+    # from the copy on disk, so a conflict named this morning is acted on this
+    # morning and not on the next run.
+    editor.repair(theirs.get(editor.CONFLICTS_FILE), echo)
 
     # Always, even when nothing above changed. `im update` is the command a
     # student is sent to when the environment is broken, and an install that is

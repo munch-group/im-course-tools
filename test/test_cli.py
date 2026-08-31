@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from im_course_tools import environment
+from im_course_tools import editor, environment
 from im_course_tools.cli import main
 
 CHAPTERS = ["iteration", "lists"]
@@ -41,6 +41,7 @@ TEMPLATE = {
     ".gitignore": ".pixi/\n__pycache__/\n",
     ".vscode/settings.json": '{\n    // the course settings\n}\n',
     ".vscode/extensions.json": '{\n    "recommendations": []\n}\n',
+    ".im-conflicts.json": '{"extensions": []}\n',
     "week1/notebooks.ipynb": notebook_bytes("week one"),
     "data/data_table.csv": "a,b\n1,2\n",
 }
@@ -227,6 +228,58 @@ def stopping_at_install(monkeypatch):
     monkeypatch.setenv("PATH", "/nonexistent")
     monkeypatch.setattr(environment, "pixi_locations", lambda *a, **k: [])
     return monkeypatch
+
+
+def test_update_removes_a_conflicting_vs_code_extension(run, course, site,
+                                                       stopping_at_install, tmp_path):
+    """The whole point of the published list, end to end.
+
+    The conflict is named in the archive `im update` downloads rather than in
+    the copy already in the folder, which is what lets one added this morning be
+    acted on this morning.
+    """
+    calls = tmp_path / "code-calls.log"
+    stub = tmp_path / "code"
+    stub.write_text(
+        "#!/bin/sh\n"
+        f'echo "$@" >> "{calls}"\n'
+        'if [ "$1" = "--list-extensions" ]; then echo ms-python.vscode-python-envs; fi\n'
+    )
+    stub.chmod(0o755)
+    stopping_at_install.setattr(editor, "code_command", lambda: stub)
+
+    published = dict(TEMPLATE)
+    published[".im-conflicts.json"] = json.dumps({"extensions": [
+        {"id": "ms-python.vscode-python-envs", "why": "It has no pixi support."},
+    ]})
+    (site / f"{ROOT}.zip").write_bytes(zip_bytes(published))
+
+    result = run("update")
+
+    assert "--uninstall-extension ms-python.vscode-python-envs" in calls.read_text()
+    assert "Removed the VS Code extension ms-python.vscode-python-envs." in result.output
+    assert "It has no pixi support." in result.output
+    # And the list itself is now in the folder, so `im doctor` can read it offline.
+    assert (course / ".im-conflicts.json").is_file()
+
+
+def test_update_leaves_extensions_alone_when_none_conflict(run, course,
+                                                           stopping_at_install, tmp_path):
+    calls = tmp_path / "code-calls.log"
+    stub = tmp_path / "code"
+    stub.write_text(
+        "#!/bin/sh\n"
+        f'echo "$@" >> "{calls}"\n'
+        'if [ "$1" = "--list-extensions" ]; then echo ms-python.python; fi\n'
+    )
+    stub.chmod(0o755)
+    stopping_at_install.setattr(editor, "code_command", lambda: stub)
+
+    result = run("update")
+
+    # Nothing named means VS Code is not consulted at all, not even to list.
+    assert not calls.exists()
+    assert "Removed the VS Code extension" not in result.output
 
 
 def test_update_replaces_an_old_file_and_keeps_what_was_there(run, course,
