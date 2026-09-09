@@ -17,7 +17,15 @@ index is asked and which command is offered.
 Nothing here ever upgrades on its own. `im` cannot replace the files it is
 running out of while it is running out of them — on Windows it plainly cannot —
 so the upgrade is something a command asks for, and what follows it is always a
-request that the student run their command again.
+process of its own running the command again.
+
+A newer `im` is rarely on its own. The course folder's own files — the manifest,
+the lock file, the scripts that put VS Code and the kernel right — are published
+from the same build, so a student running any command in the days after a
+release is usually a student whose folder is out of date as well. Upgrading the
+package and stopping there hands them half of the fix, so the upgrade is
+followed by the offer of the other half. That half is asked about and the
+upgrade is not, for the reason given at `refresh_folder`.
 """
 
 from __future__ import annotations
@@ -34,6 +42,8 @@ import time
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+
+from .course import MARKER, CourseFolderNotFound, course_folder
 
 PACKAGE = "im-course-tools"
 DEFAULT_OWNER = "munch-group"
@@ -421,6 +431,11 @@ def announce_later(echo) -> None:
     # command that was actually asked for, and a student would see the notice
     # in a different place depending on what time of day it was.
     def at_the_end() -> None:
+        # A command that upgraded said all of this on its way past, and waiting
+        # two seconds at the end of it to find out whether to say it again is
+        # two seconds a student spends looking at a finished command.
+        if _said:
+            return
         if worker is not None:
             worker.join(2.0)
         if answer:
@@ -483,6 +498,86 @@ def rerun(install: Install, echo, argv: list[str] | None = None) -> int:
     return finished.returncode
 
 
+def folder_to_refresh(install: Install) -> Path | None:
+    """The course folder a refresh would act on, or None if there is not one.
+
+    Asked of where the student is standing first, because that is what being in
+    the course folder means to them. Failing that, an `im` living inside a
+    course folder's own environment names one by existing: that folder is a
+    course folder whether or not the student happens to be standing in it.
+
+    Either answer only decides whether there is anything to offer. Where the
+    refresh then runs is left to `rerun_command`, which is also what decides
+    where the typed command runs again, so the two cannot end up disagreeing
+    about which folder this machine's `im` belongs to.
+    """
+    try:
+        return course_folder()
+    except (CourseFolderNotFound, OSError):     # or no working folder at all
+        pass
+    if install.kind == CONDA_PROJECT and install.project is not None:
+        try:
+            if (install.project / MARKER).is_file():
+                return install.project
+        except OSError:
+            return None
+    return None
+
+
+def refresh_folder(install: Install, echo, ask) -> None:
+    """Offer the course folder the same fix `im` has just had, and do it if asked.
+
+    The upgrade replaced one package. Everything else the course folder is made
+    of comes out of the same build and is just as likely to be stale, and a
+    student who upgrades `im` and stops there has taken half of a fix.
+
+    This half is asked about and the upgrade is not, because they cost
+    different things. Replacing one package takes seconds, and a student has no
+    way to have an opinion about it. `pixi install` takes minutes, and somebody
+    who typed `im get iteration` between two classes is the only one who knows
+    whether they have those minutes to give. Saying no costs them nothing: the
+    command they say no to is named in the same breath, for later.
+
+    Run as a process of its own, and as the `im` that was just installed, for
+    the same reason the relaunch is — the refresh in this process is the code
+    that was replaced a moment ago — and told not to look for updates itself,
+    so that nothing can send it round this loop a second time.
+    """
+    folder = folder_to_refresh(install)
+    if folder is None:
+        echo("")
+        echo("Not in a course folder, so only `im` itself was updated.")
+        return
+
+    # Two lines and then the question, rather than the question carrying the
+    # warning: click hangs its own "[Y/n]" off the end of whatever it is given,
+    # so a prompt that ends in anything but the question reads as a jumble.
+    echo("")
+    echo("Your course folder may be out of date too, and bringing it")
+    echo("up to date takes a few minutes.")
+    if not ask("Do that now?"):
+        echo("")
+        echo("Left alone. Run `im update` when you have a few minutes.")
+        return
+
+    command, where = rerun_command(install, ["update", "--no-upgrade"])
+    echo("")
+    try:
+        finished = subprocess.run(command, cwd=str(where) if where else None,
+                                  env={**os.environ, "IM_NO_UPDATE_CHECK": "1"})
+    except OSError as error:
+        echo(f"The refresh could not be started: {error}")
+        echo("Please run `im update` yourself.")
+        return
+
+    # Not fatal to what the student actually typed. They asked for a notebook
+    # or a diagnosis, the refresh was this command's idea rather than theirs,
+    # and it has already said for itself what went wrong.
+    if finished.returncode != 0:
+        echo("")
+        echo("That did not finish. `im update` will take it up again.")
+
+
 def upgrade(install: Install, echo) -> int:
     """Run the upgrade for this kind of install, and say plainly what happened."""
     prepared = upgrade_command(install)
@@ -528,7 +623,7 @@ def upgrade(install: Install, echo) -> int:
     return 0
 
 
-def upgrade_if_newer(echo, timeout: float = 5.0) -> int | None:
+def upgrade_if_newer(echo, timeout: float = 5.0, ask=None) -> int | None:
     """Upgrade `im` if there is a newer one, run the command again, and stop.
 
     None means carry on, and there is only one reason for it: nothing newer
@@ -536,11 +631,17 @@ def upgrade_if_newer(echo, timeout: float = 5.0) -> int | None:
     process is pointless — the code that would carry on is the code that has
     just been replaced.
 
-    Nobody is asked. A question here is one a student cannot answer: they do
-    not know what is in the newer one, they are running this command because
-    something is already wrong, and the commonest reason for a fault reaching a
-    hundred people at once is a fix that reached none of them. So it upgrades,
-    then runs what was actually typed and hands back what that says.
+    Nobody is asked about the upgrade. A question there is one a student cannot
+    answer: they do not know what is in the newer one, they are running this
+    command because something is already wrong, and the commonest reason for a
+    fault reaching a hundred people at once is a fix that reached none of them.
+    So it upgrades, then runs what was actually typed and hands back what that
+    says.
+
+    `ask` is a yes-or-no question put to the student, and it is how a command
+    offers the other half of the fix — the course folder, refreshed by the new
+    `im` before the command is run again. Leaving it out is how a command says
+    that it is that half already, which only `im update` is.
     """
     global _said
     if disabled():
@@ -561,4 +662,6 @@ def upgrade_if_newer(echo, timeout: float = 5.0) -> int | None:
     code = upgrade(install, echo)
     if code != 0:
         return code
+    if ask is not None:
+        refresh_folder(install, echo, ask)
     return rerun(install, echo)

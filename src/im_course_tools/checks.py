@@ -133,7 +133,50 @@ SKIP_WHEN_LOOKING = frozenset({
     "Creative Cloud Files", "envs",
 })
 
-EXTENSIONS = (("ms-python.python", "Python"), ("ms-toolsai.jupyter", "Jupyter"))
+# The one extension the course folder recommends by name, and the three that
+# arrive with it: it declares them as extension dependencies, so VS Code
+# installs all four from the one name. That is why the advice for a missing one
+# below is a single command rather than a list.
+EXTENSION_PACK = "munch-group.im-pixi-vscode"
+
+# What VS Code should have, in the order it installs them.
+#
+# This list named only the middle two until the term the first one mattered.
+# That is the extension that finds the Python in .pixi and selects it, so a
+# machine without it opens a notebook whose kernel picker never mentions the
+# course environment — and this check looked at such a machine and reported
+# "installed, with the Python and Jupyter extensions".
+EXTENSIONS = (
+    (EXTENSION_PACK, "Pixi, which finds the environment in .pixi and selects it"),
+    ("ms-python.python", "Python"),
+    ("ms-toolsai.jupyter", "Jupyter"),
+    ("quarto.quarto", "Quarto"),
+)
+
+# The kernel `pixi run check` installs, and the name every notebook the course
+# hands out asks for in its own metadata. Nothing else on the machine answers
+# to it, so when it is missing VS Code opens the notebook and asks the student
+# to choose — which is the moment the environment has to be found by hand.
+COURSE_KERNEL = "instructing-machines"
+COURSE_KERNEL_SPEC = ("share", "jupyter", "kernels", COURSE_KERNEL, "kernel.json")
+
+# The editor settings that belong to the folder, and the three read back here.
+# Two of them are written on the machine rather than published, by
+# .pin_pixi_path.py during `pixi run check`, because they are absolute paths
+# true of one computer. The third ships in the file and is how the course keeps
+# environment handling with the extension that understands pixi.
+SETTINGS_FILE = (".vscode", "settings.json")
+AUTHORING_SETTINGS = ("vscode", "settings.json")
+PIXI_SETTING = "im-pixi-vscode.pixiExecutable"
+PYTHON_SETTING = "python.defaultInterpreterPath"
+ENVS_SETTING = "python.useEnvironmentsExtension"
+
+# Read by matching the line rather than by parsing, because settings.json is
+# JSON with comments in it — json.loads will not read it, and the comments are
+# the point: every setting in the course folder's copy carries the paragraph
+# saying why it is there. This is how .pin_pixi_path.py writes them, too.
+STRING_SETTING = r'^[ \t]*"{}"[ \t]*:[ \t]*"((?:[^"\\]|\\.)*)"'
+FLAG_SETTING = r'^[ \t]*"{}"[ \t]*:[ \t]*(true|false)'
 
 # The kernel every notebook starts. It names the environment's own Python by
 # its whole path, which makes it the second place on disk that still remembers
@@ -2242,6 +2285,50 @@ def network_check(ctx: Context) -> list[Finding]:
     return findings
 
 
+def setting(text: str, name: str) -> str | None:
+    """The value of one string setting, out of a file full of comments."""
+    match = re.search(STRING_SETTING.format(re.escape(name)), text, re.MULTILINE)
+    if match is None:
+        return None
+    try:
+        # Through JSON so that a Windows path, whose backslashes are doubled in
+        # the file, comes back as the path it names.
+        return json.loads(f'"{match.group(1)}"')
+    except ValueError:
+        return match.group(1)
+
+
+def flag(text: str, name: str) -> bool | None:
+    """Whether one true/false setting is written down, and which it says."""
+    match = re.search(FLAG_SETTING.format(re.escape(name)), text, re.MULTILINE)
+    return None if match is None else match.group(1) == "true"
+
+
+def within(candidate: Path, parent: Path) -> bool:
+    """Whether one path lies inside another, symlinks and drive letters allowed for."""
+    try:
+        return candidate.resolve().is_relative_to(parent.resolve())
+    except (OSError, ValueError):
+        return os.path.normcase(str(candidate)).startswith(os.path.normcase(str(parent)))
+
+
+def installed_extensions(listed: str) -> dict[str, str]:
+    """What `code --list-extensions --show-versions` reported, id to version.
+
+    One line each, `publisher.name@1.2.3`. The version is kept because "which
+    extensions are installed" is only half of what someone helping a stuck
+    student needs; an id with no version does not answer the other half.
+    """
+    found: dict[str, str] = {}
+    for line in listed.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        name, _, version = line.partition("@")
+        found[name.strip().lower()] = version.strip()
+    return found
+
+
 def vscode_check(ctx: Context) -> list[Finding]:
     """Whether the editor the course is taught in is here, with what it needs."""
     places = [Path(p) for p in (
@@ -2276,11 +2363,11 @@ def vscode_check(ctx: Context) -> list[Finding]:
                          "Its command-line tool was not found, so its extensions were "
                          "not checked"])]
 
-    listed = run_briefly([command, "--list-extensions"], 30)
+    listed = run_briefly([command, "--list-extensions", "--show-versions"], 30)
     if listed is None:
         return [Finding(OK, EDITOR, "VS Code is installed", [str(command)])]
 
-    installed = {line.strip().lower() for line in listed.splitlines() if line.strip()}
+    installed = installed_extensions(listed)
 
     findings = []
 
@@ -2301,17 +2388,145 @@ def vscode_check(ctx: Context) -> list[Finding]:
     missing = [(key, name) for key, name in EXTENSIONS if key not in installed]
     if not missing:
         findings.append(Finding(
-            OK, EDITOR, "VS Code is installed, with the Python and Jupyter extensions"))
+            OK, EDITOR, "VS Code has the four extensions the course uses",
+            [f"{key}  {installed[key] or 'version not reported'}" for key, _ in EXTENSIONS]))
         return findings
+
+    # One command when the pixi extension is among the missing, because
+    # installing it installs the other three with it. Naming four when one will
+    # do is four chances to paste the wrong line.
+    absent = {key for key, _ in missing}
+    install = [EXTENSION_PACK] if EXTENSION_PACK in absent else sorted(absent)
+
     findings.append(Finding(WARN, EDITOR, "VS Code is missing an extension the course needs",
-                    [name for _, name in missing], [
+                    [f"{key}  ({name})" for key, name in missing], [
                         "Without these, VS Code opens a notebook but cannot run it, and the",
                         "kernel picker either stays empty or never finds your .pixi",
                         "environment. Install them with:",
                         "",
-                        *(f"    code --install-extension {key}" for key, _ in missing),
-                    ], fix=[*(f"    code --install-extension {key}"
-                              for key, _ in missing)]))
+                        *(f"    code --install-extension {key}" for key in install),
+                        "",
+                        "Or from the Extensions panel on the left: search '@recommended'",
+                        "and install what it lists.",
+                    ], fix=[*(f"    code --install-extension {key}" for key in install)]))
+    return findings
+
+
+def vscode_settings_check(ctx: Context) -> list[Finding]:
+    """Whether this folder carries what VS Code needs to find its own Python.
+
+    Three things have to be in place before VS Code can open one of the course
+    notebooks and simply run it: a kernel by the name the notebooks ask for, and
+    two paths in .vscode/settings.json that are true of this machine and no
+    other. All three are written by `pixi run check`, by tasks that run one
+    after another and stop at the first one to fail — so the ordinary way to
+    have none of them is a chain that stopped early. Nothing said so at the
+    time. This is what says so afterwards.
+    """
+    if ctx.folder is None:
+        return []
+
+    settings = ctx.folder.joinpath(*SETTINGS_FILE)
+
+    # The copy the book is built from keeps this folder under its undotted name
+    # and only becomes .vscode in the download, so the paths are never written
+    # there and their absence is not a fault. Saying so on every run in the one
+    # place the course is written would teach whoever reads it to ignore this.
+    if not settings.exists() and ctx.folder.joinpath(*AUTHORING_SETTINGS).is_file():
+        return []
+
+    findings: list[Finding] = []
+    env = ctx.folder.joinpath(*ENV_PATH)
+    kernel = env.joinpath(*COURSE_KERNEL_SPEC)
+
+    if not kernel.is_file():
+        findings.append(Finding(
+            WARN, EDITOR, "The kernel the course notebooks ask for is not installed",
+            [f"expected {kernel}"], [
+                f"Every notebook the course hands out names its kernel, {COURSE_KERNEL},",
+                "in its own metadata. When nothing on this machine answers to that",
+                "name, VS Code opens the notebook and asks you to choose a kernel",
+                "instead of starting one, and your .pixi environment is not among the",
+                "ones it offers.",
+                "",
+                "`pixi run check` installs it, along with everything else below.",
+            ], fix=["From your course folder, run:", "", "    pixi run check"]))
+
+    try:
+        contents = settings.read_text(encoding="utf-8")
+    except OSError:
+        findings.append(Finding(
+            WARN, EDITOR, "Your course folder has no .vscode/settings.json",
+            [str(settings)], [
+                "VS Code reads that file the moment you open the folder, and",
+                "everything the course arranges for you is in it: which Python to",
+                "use, which extension handles environments, where a notebook runs",
+                "from. Without it VS Code falls back to whatever Python it finds",
+                "first, which is not the one with the course packages in it.",
+                "",
+                "`im update` puts the folder's own files back.",
+            ], fix=["Run `im update`, which puts the folder's own files back."]))
+        return findings
+
+    pixi_path = setting(contents, PIXI_SETTING)
+    python_path = setting(contents, PYTHON_SETTING)
+
+    unwritten = [name for name, value in ((PIXI_SETTING, pixi_path),
+                                          (PYTHON_SETTING, python_path)) if value is None]
+    if unwritten:
+        findings.append(Finding(
+            WARN, EDITOR, "VS Code has not been told where things are on this machine",
+            unwritten, [
+                "Two settings hold absolute paths, so they cannot be published with",
+                "the folder and have to be written here: where pixi is, and where",
+                "this folder's Python is. Without the first, a VS Code started from",
+                "the Dock or the Start menu — which inherits none of your terminal's",
+                "PATH — cannot run pixi at all. Without the second, it picks an",
+                "interpreter of its own before the extension has chosen one.",
+                "",
+                "`pixi run check` writes both. If it has been run and they are still",
+                "missing, run it again without --quiet and read what it says: the",
+                "task that writes them runs after another that can stop the chain.",
+            ], fix=["From your course folder, run:", "", "    pixi run check"]))
+
+    wrong: list[str] = []
+    if pixi_path and not Path(pixi_path).exists():
+        wrong.append(f"{PIXI_SETTING} names {pixi_path},")
+        wrong.append("which is not there")
+    if python_path and not within(Path(python_path), env):
+        wrong.append(f"{PYTHON_SETTING} names {python_path},")
+        wrong.append(f"which is not this folder's environment ({env})")
+    if wrong:
+        findings.append(Finding(
+            WARN, EDITOR, "VS Code is pointed at paths this machine does not have",
+            wrong, [
+                "These are written for one computer, and they are wrong here. A",
+                "folder copied from another machine, or moved after it was set up,",
+                "arrives with somebody else's paths inside it.",
+                "",
+                "`pixi run check` writes both again for this machine.",
+            ], fix=["From your course folder, run:", "", "    pixi run check"]))
+
+    if flag(contents, ENVS_SETTING) is not False:
+        findings.append(Finding(
+            WARN, EDITOR, "Your settings file is older than the one the course now ships",
+            [f"{ENVS_SETTING} is not set to false in {settings}"], [
+                "That setting is what keeps environment handling with the extension",
+                "that understands pixi. Without it, the Python Environments",
+                "extension — which arrives inside the Python extension whether it is",
+                "asked for or not, and has no pixi support — takes discovery over,",
+                "and the interpreter falls back to whatever system Python is around.",
+                "",
+                "`im update` replaces the file and puts your own paths back.",
+            ], fix=["Run `im update`, which replaces the file and puts your own",
+                    "paths back afterwards."]))
+
+    if not findings:
+        findings.append(Finding(
+            OK, EDITOR, "This folder is set up for VS Code",
+            [f"kernel       {COURSE_KERNEL}",
+             f"pixi         {pixi_path}",
+             f"interpreter  {python_path}"]))
     return findings
 
 
@@ -2352,4 +2567,5 @@ CHECKS = (
     proxy_check,
     network_check,
     vscode_check,
+    vscode_settings_check,
 )

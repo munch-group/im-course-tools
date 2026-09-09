@@ -214,15 +214,20 @@ im doctor --report       # also write im-doctor-report.txt to send to an instruc
 im doctor --no-upgrade   # do not upgrade `im` itself first
 ```
 
+`--no-upgrade` is on `im get` and `im update` too.
+
 Warnings do not set the exit code; only failures do.
 
 ## Keeping itself current
 
 A fix only reaches a hundred students if it arrives, and no student thinks of
-upgrading a tool that has never asked them to. So `im` asks on their behalf: at
-most once a day, on a background thread so no command ever waits for it, with
-the answer cached in the home folder rather than the course folder, which gets
-moved and copied and started over.
+upgrading a tool that has never asked them to. So `im` asks on their behalf, at
+most once a day, with the answer cached in the home folder rather than the
+course folder, which gets moved and copied and started over. One command a day
+waits on that answer and the rest of the day's commands read it off disk. A
+command told not to upgrade — `--no-upgrade`, or `im doctor --offline` — asks
+on a background thread instead and prints one line at the end, after its own
+output rather than in front of it.
 
 Which index it asks depends on how this copy was installed, read off the machine
 rather than guessed — the conda record in the prefix, the shape of the path
@@ -237,16 +242,17 @@ around it, or the absence of both. That same answer decides what is offered:
 | pipx | `pipx upgrade im-course-tools` |
 | a checkout | nothing — the code being run is not the code installed |
 
-Every command prints one line when there is something newer, after its own
-output rather than before it. `im update` and `im doctor` go further and
-upgrade `im` before doing anything else, since both are commands for putting a
-broken setup right and a stale `im` is one of the things that can be broken.
+Every command upgrades `im` before doing anything else — `im get` as much as
+`im doctor` and `im update` — so that whatever was typed is answered by the
+code as it is today. A stale `im` is one of the faults these commands exist to
+repair, and it is the one fault that would otherwise be diagnosed by the very
+code that has the bug.
 
-Neither asks first. The question is one a student cannot answer — they do not
-know what is in the newer one, and they are running the command because
-something is already wrong — and a fix that a hundred people decline is a fix
-that did not happen. So it upgrades, and then **runs what was actually typed**,
-as a process of its own:
+Nobody is asked. The question is one a student cannot answer — they do not know
+what is in the newer one, and they are running the command because something is
+already wrong — and a fix that a hundred people decline is a fix that did not
+happen. So it upgrades, and then **runs what was actually typed**, as a process
+of its own:
 
 ```
 There is a newer im: 0.1.12 -> 0.1.13
@@ -256,6 +262,51 @@ Upgrading im from 0.1.12. This may take a minute.
 ...
 Running `im doctor --report` again on the new one.
 ```
+
+### The other half
+
+A newer `im` is rarely on its own. The manifest, the lock file and the scripts
+that put VS Code and the kernel right are published from the same build, so a
+student running any command in the days after a release usually has a stale
+course folder as well, and upgrading the package alone hands them half of a
+fix. So the upgrade is followed by the offer of the other half — `im update`,
+run by the `im` that was just installed — before the typed command is run
+again:
+
+```
+Upgrading im from 0.1.12. This may take a minute.
+...
+
+Your course folder may be out of date too, and bringing it
+up to date takes a few minutes.
+Do that now? [Y/n]: n
+
+Left alone. Run `im update` when you have a few minutes.
+
+Running `im get iteration` again on the new one.
+```
+
+This half *is* asked about, and the upgrade is not, because the two cost
+different things. Replacing one package takes seconds, and a student has no way
+to have an opinion about it. `pixi install` takes minutes, and somebody who
+typed `im get iteration` between two classes is the only one who knows whether
+they have those minutes. Saying no costs them nothing: the command they say no
+to is named in the same breath, for later. A terminal with nobody at it — a
+script, a pipe — answers no, rather than hanging or spending those minutes
+unasked.
+
+`im update` is the one command that does not ask, because it is the question,
+already answered by whoever typed it: it upgrades `im` and then runs itself
+again on the new one. Outside a course folder there is nothing to offer, and it
+says so in a line rather than silently:
+
+```
+Not in a course folder, so only `im` itself was updated.
+```
+
+A refresh that fails does not take the typed command down with it. It was this
+command's idea rather than the student's, and it has already said for itself
+what went wrong.
 
 A second process is what makes that possible at all: `im` cannot swap itself
 out from under itself, because the modules it is running are already loaded and
@@ -276,7 +327,7 @@ the loop twice.
 An upgrade that finishes cleanly is checked to have actually changed the
 version, read fresh off disk, before any of that happens: one that runs,
 succeeds and changes nothing would otherwise send a student round the same loop
-indefinitely. `--no-upgrade` on either command skips the whole thing.
+indefinitely. `--no-upgrade` on any of the commands skips the whole thing.
 
 Set `IM_NO_UPDATE_CHECK=1` to switch the whole thing off.
 

@@ -55,6 +55,12 @@ ENV_PATH = (".pixi", "envs", "default")
 # update` is what keeps it current.
 CHECK_SCRIPT = ".check_env.py"
 
+# Its other half, run after VS Code has been set up rather than before it. Named
+# here for the same reason as the one above: it lives in the folder rather than
+# in this package, so a fix to it reaches a student only if `im update` carries
+# it, and a file left out of the list below is a file that never changes again.
+EDITOR_SCRIPT = ".check_vscode.py"
+
 # What `im doctor` asks for when a course folder's pixi.toml cannot be read at
 # all. The pair is (import name, what to call it), so a missing package can be
 # reported by the name a student would recognise.
@@ -115,6 +121,7 @@ FILES = (
     "pixi.toml",
     "pixi.lock",
     CHECK_SCRIPT,
+    EDITOR_SCRIPT,
     ".pin_pixi_path.py",
     ".pin_shell_path.py",
     ".pin_shell_path.sh",

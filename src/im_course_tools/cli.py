@@ -17,6 +17,13 @@ Every command that writes something writes it into the course folder, found by
 walking up from wherever the student happens to be, and none of them ever
 overwrite work: a notebook that already exists is left alone and the fresh copy
 lands beside it, and a project that already exists stops the command.
+
+Every one of them also gets onto the current `im` before doing anything else,
+and then runs again on it, so that whatever was typed is answered by the code
+as it is today rather than by code a release has already fixed. That is not
+extra work for the student: they type one command and get one command's worth
+of output, and what the upgrade wants from them is the one thing it cannot work
+out for itself — whether they have the minutes their course folder needs.
 """
 
 from __future__ import annotations
@@ -40,6 +47,33 @@ def _offline(error) -> int:
     click.echo(f"Could not reach the course website: {error}")
     click.echo("Check that you are online. Nothing has been changed.")
     return 1
+
+
+def _confirm(question: str) -> bool:
+    """Ask a yes-or-no question, and take silence for no.
+
+    Defaulting to yes, because the only question ever asked here is asked about
+    something worth doing. A terminal with nobody at it — a script, a pipe,
+    anything that closed stdin — answers no rather than hanging: minutes of
+    `pixi install` that nobody asked for are worse than minutes not spent.
+    """
+    try:
+        return click.confirm(question, default=True)
+    except (click.Abort, EOFError, OSError):
+        return False
+
+
+def _upgrade_first(ask=_confirm) -> None:
+    """Get onto the current `im` before doing anything, or stop trying.
+
+    Anything other than None means this process has nothing left to do: either
+    the upgrade failed, or it worked and the command has already been run again
+    on the new code by a process of its own. Carrying on here would mean
+    carrying on in the code that has just been replaced.
+    """
+    stop = release.upgrade_if_newer(click.echo, ask=ask)
+    if stop is not None:
+        raise SystemExit(stop)
 
 
 def _folder():
@@ -86,23 +120,34 @@ def doctor(report: bool, offline: bool, no_upgrade: bool, verbose: bool) -> None
     Unlike the other commands this one runs anywhere, because not being in the
     course folder is one of the things it is there to notice.
 
-    The one thing it will change is `im` itself: a stale `im` is the one fault
-    that would otherwise be diagnosed by the very code that has the bug, so it
-    upgrades itself first and then runs what was typed. Everything else it
-    only reads.
+    What it will change is `im` itself, and the course folder if the student
+    says yes to it: a stale `im` is the one fault that would otherwise be
+    diagnosed by the very code that has the bug, and a stale course folder is
+    among the commonest faults it finds. Both are put right before the scan
+    rather than reported by it. Everything else it only reads.
     """
     if not offline and not no_upgrade:
-        stop = release.upgrade_if_newer(click.echo)
-        if stop is not None:
-            raise SystemExit(stop)
+        _upgrade_first()
     raise SystemExit(diagnose(click.echo, offline=offline, report=report,
                               version=__version__, verbose=verbose))
 
 
 @main.command()
 @click.argument("name", required=False)
-def get(name: str | None) -> None:
-    """Download a chapter notebook, or a whole project, by NAME."""
+@click.option("--no-upgrade", is_flag=True,
+              help="Do not upgrade `im` itself first.")
+def get(name: str | None, no_upgrade: bool) -> None:
+    """Download a chapter notebook, or a whole project, by NAME.
+
+    Upgrades `im` first when there is a newer one, before a word of the
+    catalogue is fetched, so that what arrives is read by the code that was
+    released alongside it. A chapter published this morning can want a package
+    that only this morning's pixi.toml knows about, which is why the course
+    folder is offered the same fix on the way past.
+    """
+    if not no_upgrade:
+        _upgrade_first()
+
     chapters, chapter_error = _catalog(notebooks.available)
     project_list, project_error = _catalog(projects.available)
 
@@ -178,10 +223,12 @@ def update(no_upgrade: bool) -> None:
     # `im update` is the command for putting the environment right, and `im`
     # is part of the environment. Upgrading it first means the refresh that
     # follows is done by the current code rather than by the code being fixed.
+    #
+    # Nothing is asked here, which is what the other commands pass `_confirm`
+    # for. What they ask is whether to run this command; asking it of somebody
+    # who has just typed this command would be asking them to say yes twice.
     if not no_upgrade:
-        stop = release.upgrade_if_newer(click.echo)
-        if stop is not None:
-            raise SystemExit(stop)
+        _upgrade_first(ask=None)
     try:
         raise SystemExit(environment.update(folder, click.echo))
     except urllib.error.URLError as error:

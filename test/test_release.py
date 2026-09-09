@@ -10,11 +10,13 @@ import json
 import time
 from pathlib import Path
 
+import click
 import pytest
 from click.testing import CliRunner
 
-from im_course_tools import release
+from im_course_tools import cli, release
 from im_course_tools.cli import main
+from im_course_tools.course import CourseFolderNotFound
 from im_course_tools.release import (CONDA, CONDA_GLOBAL, CONDA_PROJECT, PACKAGE, PIP,
                               PIPX, SOURCE, Install)
 
@@ -415,6 +417,131 @@ def test_a_checkout_is_never_upgraded_underneath_a_developer(monkeypatch, tools)
     assert release.upgrade_if_newer(lambda line: None, timeout=0.1) is None
 
 
+# --- the other half: the course folder ---------------------------------------- #
+
+def nowhere(*args, **kwargs):
+    """A machine where nothing at or above the working folder is a course folder."""
+    raise CourseFolderNotFound("nothing here has a pixi.toml in it")
+
+
+@pytest.fixture
+def standing_in_one(tmp_path, monkeypatch):
+    """A course folder, and the student standing in it."""
+    folder = tmp_path / "instructing-machines"
+    folder.mkdir()
+    (folder / "pixi.toml").write_text("[workspace]\n")
+    monkeypatch.setenv("IM_COURSE_FOLDER", str(folder))
+    return folder
+
+
+def test_the_folder_is_offered_the_same_fix_and_refreshed_when_asked(
+        upgradable, standing_in_one, monkeypatch):
+    """And refreshed by the `im` just installed, not by the one being replaced:
+    it is run the same way the command itself is run again."""
+    calls = ran(monkeypatch, 0)
+    lines = []
+    release.upgrade_if_newer(lines.append, timeout=0.1, ask=lambda _: True)
+    assert [command[-2:] for command, _ in calls[1:]] == [
+        ["update", "--no-upgrade"],             # the other half
+        ["doctor", "--report"],                 # and then what was actually typed
+    ]
+    assert "may be out of date too" in "\n".join(lines)
+
+
+def test_the_refresh_is_not_allowed_to_upgrade_as_well(upgradable, standing_in_one,
+                                                       monkeypatch):
+    calls = ran(monkeypatch, 0)
+    release.upgrade_if_newer(lambda line: None, timeout=0.1, ask=lambda _: True)
+    assert calls[1][1]["env"]["IM_NO_UPDATE_CHECK"] == "1"
+
+
+def test_saying_no_leaves_the_folder_alone_and_names_the_command_for_later(
+        upgradable, standing_in_one, monkeypatch):
+    calls = ran(monkeypatch, 0)
+    lines = []
+    release.upgrade_if_newer(lines.append, timeout=0.1, ask=lambda _: False)
+    assert len(calls) == 2                      # the upgrade and the rerun, no refresh
+    assert "Run `im update`" in "\n".join(lines)
+
+
+def test_what_was_typed_is_run_again_even_when_the_refresh_failed(
+        upgradable, standing_in_one, monkeypatch):
+    """The refresh was this command's idea rather than the student's, and it
+    has already said for itself what went wrong."""
+    calls = []
+
+    def fake_run(command, **kwargs):
+        if any("importlib.metadata" in str(part) for part in command):
+            return type("Finished", (), {"returncode": 0, "stdout": "0.2.0\n"})()
+        calls.append(command)
+        return type("Finished", (), {"returncode": 1 if len(calls) == 2 else 0}) ()
+
+    monkeypatch.setattr(release.subprocess, "run", fake_run)
+    monkeypatch.setattr(release.sys, "argv", ["im", "get", "iteration"])
+    lines = []
+    assert release.upgrade_if_newer(lines.append, timeout=0.1, ask=lambda _: True) == 0
+    assert calls[-1][-2:] == ["get", "iteration"]
+    assert "did not finish" in "\n".join(lines)
+
+
+def test_a_refresh_that_will_not_start_is_said_rather_than_swallowed(
+        upgradable, standing_in_one, monkeypatch):
+    calls = []
+
+    def upgrade_then_refuse(command, **kwargs):
+        if any("importlib.metadata" in str(part) for part in command):
+            return type("Finished", (), {"returncode": 0, "stdout": "0.2.0\n"})()
+        calls.append(command)
+        if calls[-1][-2:] == ["update", "--no-upgrade"]:
+            raise OSError("no such file")
+        return type("Finished", (), {"returncode": 0})()
+
+    monkeypatch.setattr(release.subprocess, "run", upgrade_then_refuse)
+    monkeypatch.setattr(release.sys, "argv", ["im", "doctor"])
+    lines = []
+    assert release.upgrade_if_newer(lines.append, timeout=0.1, ask=lambda _: True) == 0
+    assert "could not be started" in "\n".join(lines)
+    assert calls[-1][-1:] == ["doctor"]         # and it still ran what was typed
+
+
+def test_outside_a_course_folder_nobody_is_asked_and_the_line_says_why(
+        upgradable, monkeypatch):
+    """There is nothing to refresh, so the question would be one with no
+    answer — and a student who expected their folder to be brought up to date
+    should be told that it was not."""
+    monkeypatch.setattr(release, "course_folder", nowhere)
+    calls = ran(monkeypatch, 0)
+    lines = []
+    release.upgrade_if_newer(lines.append, timeout=0.1,
+                             ask=lambda _: pytest.fail("asked with nowhere to do it"))
+    assert len(calls) == 2                      # the upgrade and the rerun
+    assert "Not in a course folder" in "\n".join(lines)
+
+
+def test_an_im_inside_a_course_folder_names_one_from_anywhere(monkeypatch, tmp_path,
+                                                              tools):
+    """It is the folder the relaunch runs in, so it is the folder to refresh."""
+    monkeypatch.setattr(release, "course_folder", nowhere)
+    (tmp_path / "pixi.toml").write_text("[workspace]\n")
+    install = Install(CONDA_PROJECT, "0.1.3", Path("/x"), project=tmp_path)
+    assert release.folder_to_refresh(install) == tmp_path
+
+
+def test_a_pixi_project_that_is_not_a_course_folder_is_not_offered_one(monkeypatch,
+                                                                       tmp_path, tools):
+    monkeypatch.setattr(release, "course_folder", nowhere)
+    install = Install(CONDA_PROJECT, "0.1.3", Path("/x"), project=tmp_path)
+    assert release.folder_to_refresh(install) is None
+
+
+def test_a_command_that_offers_nothing_refreshes_nothing(upgradable, standing_in_one,
+                                                         monkeypatch):
+    """`im update` leaves `ask` out, because it is the question."""
+    calls = ran(monkeypatch, 0)
+    release.upgrade_if_newer(lambda line: None, timeout=0.1)
+    assert len(calls) == 2
+
+
 # --- the commands -------------------------------------------------------------- #
 
 @pytest.fixture
@@ -488,3 +615,64 @@ def test_doctor_warns_when_a_newer_im_is_already_known_about(monkeypatch, tools)
     assert finding.status == "warn"
     assert "0.2.0 is out" in finding.title
     assert "pip install --upgrade" in "\n".join(finding.advice)
+
+
+def test_every_command_upgrades_im_before_doing_its_own_work(course, monkeypatch):
+    """`get` included: what the website is offering today is as much a part of
+    a release as the tool that fetches it."""
+    monkeypatch.setenv("IM_COURSE_FOLDER", str(course))
+    monkeypatch.setattr(release, "upgrade_if_newer", lambda *a, **k: 0)
+    monkeypatch.setattr("im_course_tools.notebooks.available",
+                        lambda *a, **k: pytest.fail("carried on with the old code"))
+    assert CliRunner().invoke(main, ["get", "iteration"]).exit_code == 0
+
+
+def test_get_can_be_told_to_leave_im_alone(course, monkeypatch):
+    monkeypatch.setenv("IM_COURSE_FOLDER", str(course))
+    monkeypatch.setattr(release, "upgrade_if_newer",
+                        lambda *a, **k: pytest.fail("upgraded anyway"))
+    monkeypatch.setattr("im_course_tools.notebooks.available", lambda *a, **k: [])
+    monkeypatch.setattr("im_course_tools.projects.available", lambda *a, **k: [])
+    assert CliRunner().invoke(main, ["get", "--no-upgrade"]).exit_code == 1
+
+
+def asked_with(monkeypatch) -> dict:
+    """What the command handed to the upgrade, without letting it run."""
+    seen = {}
+    monkeypatch.setattr(release, "upgrade_if_newer",
+                        lambda echo, **kwargs: seen.update(kwargs) or 0)
+    return seen
+
+
+def test_get_and_doctor_offer_the_folder_the_same_fix(course, monkeypatch, quick_doctor):
+    monkeypatch.setenv("IM_COURSE_FOLDER", str(course))
+    for argv in (["get", "iteration"], ["doctor"]):
+        seen = asked_with(monkeypatch)
+        CliRunner().invoke(main, argv)
+        assert seen["ask"] is not None, argv
+
+
+def test_update_is_never_asked_whether_to_refresh_the_folder(course, monkeypatch):
+    """It is that question, already answered by whoever typed it."""
+    monkeypatch.setenv("IM_COURSE_FOLDER", str(course))
+    seen = asked_with(monkeypatch)
+    CliRunner().invoke(main, ["update"])
+    assert seen["ask"] is None
+
+
+def test_a_terminal_with_nobody_at_it_answers_no(monkeypatch):
+    """Rather than hanging, or spending minutes on an install nobody asked for."""
+    def no_one_there(*args, **kwargs):
+        raise click.Abort()
+
+    monkeypatch.setattr(cli.click, "confirm", no_one_there)
+    assert cli._confirm("Refresh it now?") is False
+
+
+def test_the_question_defaults_to_yes(monkeypatch):
+    """The only thing ever asked about here is worth doing."""
+    seen = {}
+    monkeypatch.setattr(cli.click, "confirm",
+                        lambda question, **kwargs: seen.update(kwargs) or True)
+    assert cli._confirm("Refresh it now?") is True
+    assert seen["default"] is True

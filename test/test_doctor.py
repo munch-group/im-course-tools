@@ -1696,3 +1696,167 @@ def test_a_mac_bash_is_just_bash(here, monkeypatch):
     here.system = "Darwin"
     shell_is(here, monkeypatch, "bash")
     assert checks.shell_finding(here).title == "bash"
+
+
+# --- the VS Code side ------------------------------------------------------- #
+
+SETTINGS = """{
+    // The comment above a setting is the reason it is there, which is why this
+    // file cannot be read with json.loads.
+    "python.useEnvironmentsExtension": false,
+    "im-pixi-vscode.pixiExecutable": "{pixi}",
+    "python.defaultInterpreterPath": "{python}",
+}
+"""
+
+
+def set_up_for_vscode(course: Path, pixi: Path | None = None,
+                      python: Path | None = None, kernel: bool = True,
+                      envs_setting: bool = True) -> Path:
+    """A course folder as `pixi run check` leaves it, or as it leaves it broken."""
+    env = course.joinpath(*checks.ENV_PATH)
+    if kernel:
+        spec = env.joinpath(*checks.COURSE_KERNEL_SPEC)
+        spec.parent.mkdir(parents=True, exist_ok=True)
+        spec.write_text("{}")
+
+    interpreter = python if python is not None else env / "bin" / "python"
+    if python is None:
+        interpreter.parent.mkdir(parents=True, exist_ok=True)
+        interpreter.write_text("")
+
+    executable = pixi if pixi is not None else course / "pixi-stub"
+    if pixi is None:
+        executable.write_text("")
+
+    settings = course.joinpath(*checks.SETTINGS_FILE)
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    body = SETTINGS.replace("{pixi}", str(executable).replace("\\", "\\\\"))
+    body = body.replace("{python}", str(interpreter).replace("\\", "\\\\"))
+    if not envs_setting:
+        body = "\n".join(line for line in body.splitlines()
+                         if checks.ENVS_SETTING not in line) + "\n"
+    settings.write_text(body)
+    return settings
+
+
+def settings_findings(course: Path) -> list:
+    return checks.vscode_settings_check(
+        Context(system=platform.system(), cwd=course, folder=course))
+
+
+def test_a_folder_pixi_run_check_finished_on_is_reported_as_set_up(course):
+    set_up_for_vscode(course)
+    findings = settings_findings(course)
+    assert [f.status for f in findings] == [OK]
+    assert checks.COURSE_KERNEL in "\n".join(findings[0].detail)
+
+
+def test_the_missing_notebook_kernel_is_named(course):
+    set_up_for_vscode(course, kernel=False)
+    titles = [f.title for f in settings_findings(course) if f.status == WARN]
+    assert any("kernel" in title for title in titles)
+
+
+def test_paths_that_were_never_written_are_named_one_by_one(course):
+    """A chain that stopped before the pin task leaves the published file as it was."""
+    settings = course.joinpath(*checks.SETTINGS_FILE)
+    settings.parent.mkdir(parents=True)
+    settings.write_text('{\n    "python.useEnvironmentsExtension": false,\n}\n')
+    set_up_for_vscode(course)          # kernel and environment, but keep this file
+    settings.write_text('{\n    "python.useEnvironmentsExtension": false,\n}\n')
+
+    warned = [f for f in settings_findings(course) if f.status == WARN]
+    assert len(warned) == 1
+    assert warned[0].detail == [checks.PIXI_SETTING, checks.PYTHON_SETTING]
+    assert "pixi run check" in "\n".join(warned[0].fix)
+
+
+def test_a_folder_copied_from_another_machine_is_caught(course, tmp_path):
+    set_up_for_vscode(course, pixi=tmp_path / "somebody-elses" / "pixi",
+                      python=tmp_path / "somebody-elses" / "python")
+    warned = [f for f in settings_findings(course) if f.status == WARN]
+    assert len(warned) == 1
+    assert "does not have" in warned[0].title
+    assert "pixi run check" in "\n".join(warned[0].fix)
+
+
+def test_an_older_settings_file_is_told_from_a_broken_one(course):
+    set_up_for_vscode(course, envs_setting=False)
+    warned = [f for f in settings_findings(course) if f.status == WARN]
+    assert len(warned) == 1
+    assert "im update" in "\n".join(warned[0].fix)
+
+
+def test_a_folder_with_no_settings_file_at_all_is_sent_to_im_update(course):
+    set_up_for_vscode(course)
+    course.joinpath(*checks.SETTINGS_FILE).unlink()
+    warned = [f for f in settings_findings(course) if f.status == WARN]
+    assert any("im update" in "\n".join(f.fix) for f in warned)
+
+
+def test_the_book_s_own_copy_is_left_alone(course):
+    """Undotted `vscode/`, where the paths are never written and nothing is wrong."""
+    set_up_for_vscode(course)
+    course.joinpath(*checks.SETTINGS_FILE).unlink()
+    authoring = course.joinpath(*checks.AUTHORING_SETTINGS)
+    authoring.parent.mkdir(parents=True, exist_ok=True)
+    authoring.write_text("{}")
+    assert settings_findings(course) == []
+
+
+def test_a_setting_is_read_out_of_a_file_full_of_comments():
+    text = '{\n    // not this one: "python.defaultInterpreterPath": "wrong"\n' \
+           '    "python.defaultInterpreterPath": "/somewhere/bin/python",\n}\n'
+    assert checks.setting(text, "python.defaultInterpreterPath") == "/somewhere/bin/python"
+    assert checks.setting(text, "not.written") is None
+
+
+def test_a_windows_path_comes_back_as_the_path_it_names():
+    text = '{\n    "im-pixi-vscode.pixiExecutable": "C:\\\\Users\\\\a\\\\pixi.exe",\n}\n'
+    assert checks.setting(text, "im-pixi-vscode.pixiExecutable") == r"C:\Users\a\pixi.exe"
+
+
+def test_a_flag_is_told_from_a_flag_that_was_never_written():
+    assert checks.flag('{\n    "python.useEnvironmentsExtension": false,\n}', 
+                       checks.ENVS_SETTING) is False
+    assert checks.flag('{\n    "python.useEnvironmentsExtension": true,\n}',
+                       checks.ENVS_SETTING) is True
+    assert checks.flag("{}", checks.ENVS_SETTING) is None
+
+
+def test_extensions_are_reported_with_their_versions():
+    listed = "ms-python.python@2026.4.0\nmunch-group.im-pixi-vscode@0.1.8\n\n"
+    assert checks.installed_extensions(listed) == {
+        "ms-python.python": "2026.4.0",
+        "munch-group.im-pixi-vscode": "0.1.8",
+    }
+
+
+def with_extensions(monkeypatch, course, listed: str):
+    monkeypatch.setattr(checks.editor, "code_command", lambda: "code")
+    monkeypatch.setattr(checks, "run_briefly", lambda *a, **k: listed)
+    return checks.vscode_check(Context(system=platform.system(), cwd=course, folder=course))
+
+
+def test_all_four_extensions_are_looked_for_and_shown(monkeypatch, course):
+    listed = "\n".join(f"{key}@1.0.0" for key, _ in checks.EXTENSIONS)
+    findings = with_extensions(monkeypatch, course, listed)
+    assert [f.status for f in findings] == [OK]
+    for key, _ in checks.EXTENSIONS:
+        assert any(key in line for line in findings[0].detail)
+
+
+def test_a_missing_pixi_extension_is_one_command_and_not_four(monkeypatch, course):
+    findings = with_extensions(monkeypatch, course, "")
+    warned = [f for f in findings if f.status == WARN]
+    assert len(warned) == 1
+    assert warned[0].fix == [f"    code --install-extension {checks.EXTENSION_PACK}"]
+
+
+def test_a_missing_extension_the_pack_would_not_bring_is_named_itself(monkeypatch, course):
+    listed = "\n".join(f"{key}@1.0.0" for key, _ in checks.EXTENSIONS
+                       if key != "quarto.quarto")
+    findings = with_extensions(monkeypatch, course, listed)
+    warned = [f for f in findings if f.status == WARN]
+    assert warned[0].fix == ["    code --install-extension quarto.quarto"]

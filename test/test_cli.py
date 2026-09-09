@@ -35,6 +35,7 @@ TEMPLATE = {
     "pixi.toml": "[workspace]\nname = 'instructing-machines'\n",
     "pixi.lock": "version: 6\n",
     ".check_env.py": "# say whether this environment is complete\n",
+    ".check_vscode.py": "# say whether VS Code has what this folder asks for\n",
     ".pin_pixi_path.py": "# tell VS Code where pixi is\n",
     ".pin_shell_path.py": "# tell the terminal where pixi is\n",
     ".pin_shell_path.sh": "# the same, in shell\n",
