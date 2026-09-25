@@ -1,23 +1,23 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url>
-    <loc>https://munch-group.github.io/im-course-tools/pages/example.html</loc>
-    <lastmod>2026-09-09T11:12:51.377Z</lastmod>
-  </url>
-  <url>
     <loc>https://munch-group.github.io/im-course-tools/api/scriptname.html</loc>
-    <lastmod>2026-09-09T11:12:51.377Z</lastmod>
+    <lastmod>2026-09-25T14:58:53.962Z</lastmod>
   </url>
   <url>
     <loc>https://munch-group.github.io/im-course-tools/api/index.html</loc>
-    <lastmod>2026-09-09T11:12:51.377Z</lastmod>
-  </url>
-  <url>
-    <loc>https://munch-group.github.io/im-course-tools/api/functionname.html</loc>
-    <lastmod>2026-09-09T11:12:51.377Z</lastmod>
+    <lastmod>2026-09-25T14:58:53.962Z</lastmod>
   </url>
   <url>
     <loc>https://munch-group.github.io/im-course-tools/pages/overview.html</loc>
-    <lastmod>2026-09-09T11:12:51.377Z</lastmod>
+    <lastmod>2026-09-25T14:58:53.963Z</lastmod>
+  </url>
+  <url>
+    <loc>https://munch-group.github.io/im-course-tools/pages/example.html</loc>
+    <lastmod>2026-09-25T14:58:53.962Z</lastmod>
+  </url>
+  <url>
+    <loc>https://munch-group.github.io/im-course-tools/api/functionname.html</loc>
+    <lastmod>2026-09-25T14:58:53.962Z</lastmod>
   </url>
 </urlset>
