@@ -1791,6 +1791,31 @@ def interpreter_check(ctx: Context) -> Finding | None:
                    ])
 
 
+def launched_globally(prefix: Path, running: Path | None = None,
+                      home: Path | None = None) -> bool:
+    """Whether `prefix` is the pixi global environment this `im` is running from.
+
+    `pixi global install` puts a small launcher in ~/.pixi/bin for every command
+    it installs, and the launcher sets CONDA_PREFIX to its own environment before
+    starting the real one. So an `im` installed that way always sees a conda
+    environment active, the one it was installed into, whatever the terminal
+    that typed `im` actually has active.
+    """
+    running = Path(running or sys.prefix)
+    pixi_home = Path(os.environ.get("PIXI_HOME") or (home or Path.home()) / ".pixi")
+    return (same_folder(prefix, running)
+            and same_folder(running.parent, pixi_home / "envs"))
+
+
+def on_path(env: Path) -> bool:
+    """Whether this terminal's PATH runs programs out of `env`, as activating it does."""
+    folders = (env / "bin", env / "Scripts", env)
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if entry and any(same_folder(Path(entry), folder) for folder in folders):
+            return True
+    return False
+
+
 def activation_check(ctx: Context) -> Finding | None:
     """Whether this terminal is standing inside the course environment.
 
@@ -1811,6 +1836,15 @@ def activation_check(ctx: Context) -> Finding | None:
     root = os.environ.get("PIXI_PROJECT_ROOT")
     prefix = os.environ.get("CONDA_PREFIX")
     venv = os.environ.get("VIRTUAL_ENV")
+
+    # A CONDA_PREFIX naming the environment `im` itself runs from, when that is
+    # a pixi global one, was set by the launcher in ~/.pixi/bin on its way to
+    # starting `im`, not by anything in this terminal. It replaced whatever the
+    # terminal had, so the terminal's own answer has to come from PATH, which
+    # the launcher only added to.
+    if prefix and launched_globally(Path(prefix)):
+        prefix = str(env) if on_path(env) else None
+
     active = Path(prefix or venv) if (prefix or venv) else None
 
     if active is not None and same_folder(active, env):
@@ -2412,6 +2446,90 @@ def vscode_check(ctx: Context) -> list[Finding]:
     return findings
 
 
+def course_of(folder: Path, course: Path) -> bool:
+    """Whether `folder`, inside `course`, belongs to it and not to a course of its own.
+
+    A folder with its own pixi.toml between it and the course folder is a
+    project in its own right, which is what the book's repository looks like
+    from the inside: opening that is opening the right folder.
+    """
+    for step in [folder, *folder.parents]:
+        if same_folder(step, course):
+            return True
+        if (step / MARKER).is_file():
+            return False
+    return False
+
+
+def vscode_folder_check(ctx: Context) -> Finding | None:
+    """Whether VS Code has been opening the course folder, or a folder inside it.
+
+    Everything the course folder does for VS Code starts from the folder VS
+    Code has open. The settings are read from .vscode in that folder and no
+    other, and the environment is looked for from there downward and never
+    upward. Open `week1` instead of the course folder and the .pixi environment
+    is one level above the search, so it never appears in the kernel picker,
+    the notebooks cannot find the kernel they name, and none of the course
+    settings apply.
+
+    The terminal cannot see this. `im` finds the course folder by walking up
+    from wherever it is run, so every command works in that window, which makes
+    this one worth saying from here: the student is told everything is fine
+    by the terminal while the editor next to it is not.
+
+    Only the most recent use counts. A student who opened `week1` once, was
+    told, and has opened the course folder since has nothing left to fix.
+    """
+    if ctx.folder is None:
+        return None
+
+    opened = [o for o in editor.opened_folders() if is_dir(o.folder)]
+    course_used = max((o.when for o in opened if same_folder(o.folder, ctx.folder)),
+                      default=None)
+    inside = [o for o in opened
+              if not same_folder(o.folder, ctx.folder)
+              and within(o.folder, ctx.folder) and course_of(o.folder, ctx.folder)
+              and (course_used is None or o.when > course_used)]
+
+    if not inside:
+        if course_used is None:
+            return None
+        return Finding(OK, EDITOR, "VS Code opens the course folder itself",
+                       [str(ctx.folder)])
+
+    def shown(folder: Path) -> str:
+        try:
+            return str(folder.resolve().relative_to(ctx.folder.resolve()))
+        except (OSError, ValueError):
+            return str(folder)
+
+    inside.sort(key=lambda o: o.when, reverse=True)
+    return Finding(
+        WARN, EDITOR, "VS Code has been opening a folder inside your course folder",
+        [f"opened       {shown(o.folder)}" for o in inside] +
+        [f"instead of   {ctx.folder}"], [
+            "VS Code reads the course settings, and looks for the course Python,",
+            "only from the folder it has open. Opened on a folder inside the",
+            "course folder, it finds neither: the .pixi environment is one level",
+            "up from where it looks, so notebooks cannot find their kernel and",
+            "the kernel picker never offers the course environment.",
+            "",
+            "The terminal does not notice, because `im` and `pixi` look for the",
+            "course folder upward from wherever they are run.",
+            "",
+            "In VS Code, choose File -> Open Folder and pick the course folder",
+            "itself, the one with pixi.toml in it:",
+            "",
+            f"    {ctx.folder}",
+            "",
+            "Then open notebooks from the Explorer on the left, where the folders",
+            "inside it are still there to click on.",
+        ], fix=["In VS Code, choose File -> Open Folder and pick your course folder",
+                "itself, not a folder inside it:",
+                "",
+                f"    {ctx.folder}"])
+
+
 def vscode_settings_check(ctx: Context) -> list[Finding]:
     """Whether this folder carries what VS Code needs to find its own Python.
 
@@ -2567,5 +2685,6 @@ CHECKS = (
     proxy_check,
     network_check,
     vscode_check,
+    vscode_folder_check,
     vscode_settings_check,
 )

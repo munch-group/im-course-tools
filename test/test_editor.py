@@ -136,3 +136,65 @@ def test_code_command_finds_the_one_inside_the_application(tmp_path, monkeypatch
 def test_code_command_prefers_the_one_on_path(tmp_path, monkeypatch):
     monkeypatch.setattr(editor.shutil, "which", lambda _name: str(tmp_path / "code"))
     assert editor.code_command() == tmp_path / "code"
+
+
+def remember(data: Path, key: str, uri: str, when: float) -> Path:
+    """One folder as VS Code records it, last used at `when`."""
+    entry = data / "User" / "workspaceStorage" / key
+    entry.mkdir(parents=True)
+    (entry / "workspace.json").write_text(json.dumps({"folder": uri}))
+    (entry / "state.vscdb").write_bytes(b"")
+    for path in (entry / "workspace.json", entry / "state.vscdb", entry):
+        os.utime(path, (when, when))
+    return entry
+
+
+def test_opened_folders_are_read_with_when_they_were_last_used(tmp_path):
+    course = tmp_path / "course folder"
+    remember(tmp_path, "a", course.as_uri(), 1000)
+    remember(tmp_path, "b", (course / "week1").as_uri(), 2000)
+
+    found = sorted(editor.opened_folders(tmp_path), key=lambda o: o.when)
+    assert [(o.folder, o.when) for o in found] == [(course, 1000), (course / "week1", 2000)]
+
+
+def test_the_newest_file_in_a_folder_s_storage_is_when_it_was_used(tmp_path):
+    entry = remember(tmp_path, "a", (tmp_path / "x").as_uri(), 1000)
+    os.utime(entry / "state.vscdb", (5000, 5000))
+    assert editor.opened_folders(tmp_path)[0].when == 5000
+
+
+def test_what_is_not_a_local_folder_is_passed_over(tmp_path):
+    remember(tmp_path, "remote", "vscode-remote://ssh-remote%2Bhost/home/a", 1)
+    entry = tmp_path / "User" / "workspaceStorage" / "multi-root"
+    entry.mkdir(parents=True)
+    (entry / "workspace.json").write_text('{"workspace": "file:///a/b.code-workspace"}')
+    broken = tmp_path / "User" / "workspaceStorage" / "broken"
+    broken.mkdir()
+    (broken / "workspace.json").write_text("not json")
+    assert editor.opened_folders(tmp_path) == []
+
+
+def test_no_vscode_at_all_is_no_folders(tmp_path):
+    assert editor.opened_folders(tmp_path / "nothing here") == []
+
+
+@pytest.mark.parametrize("uri, expected", [
+    ("file:///Users/a/instructing-machines", "/Users/a/instructing-machines"),
+    ("file:///Users/a/my%20course/week1", "/Users/a/my course/week1"),
+    ("file:///c%3A/Users/a/instructing-machines", "c:/Users/a/instructing-machines"),
+    ("vscode-remote://wsl%2Bubuntu/home/a", None),
+    ("file://server/share/course", None),
+])
+def test_a_folder_uri_becomes_the_path_it_names(uri, expected):
+    found = editor.folder_from_uri(uri)
+    assert found == (None if expected is None else Path(expected))
+
+
+def test_vscode_keeps_its_memory_somewhere_different_on_each_system(tmp_path):
+    home = tmp_path
+    assert editor.user_data_dir("Darwin", home, {}) == \
+        home / "Library" / "Application Support" / "Code"
+    assert editor.user_data_dir("Windows", home, {"APPDATA": str(tmp_path / "Roaming")}) == \
+        tmp_path / "Roaming" / "Code"
+    assert editor.user_data_dir("Linux", home, {}) == home / ".config" / "Code"

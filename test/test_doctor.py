@@ -8,6 +8,7 @@ ones that cannot be arranged on demand.
 """
 
 import json
+import os
 import platform
 import subprocess
 import sys
@@ -900,6 +901,54 @@ def test_a_second_environment_of_this_folder_is_named_as_that(here, course, monk
     finding = checks.activation_check(ready(here, course))
     assert finding.status == WARN
     assert "docs" in finding.title
+
+
+def installed_globally(monkeypatch, tmp_path) -> Path:
+    """`im` run through pixi global's launcher, which sets CONDA_PREFIX to its own env."""
+    pixi_home = tmp_path / "pixi-home"
+    own = pixi_home / "envs" / "im-course-tools"
+    own.mkdir(parents=True)
+    monkeypatch.setenv("PIXI_HOME", str(pixi_home))
+    monkeypatch.setattr(checks.sys, "prefix", str(own))
+    monkeypatch.setenv("CONDA_PREFIX", str(own))
+    return own
+
+
+def test_the_global_launcher_s_own_prefix_is_not_taken_for_conda(
+        here, course, monkeypatch, tmp_path):
+    """Nothing active in the terminal, and `im` installed with pixi global."""
+    nothing_active(monkeypatch)
+    own = installed_globally(monkeypatch, tmp_path)
+    monkeypatch.setenv("PATH", os.pathsep.join([str(own / "bin"), "/usr/bin", "/bin"]))
+    finding = checks.activation_check(ready(here, course))
+    assert finding.status == WARN
+    assert "not active" in finding.title
+    assert "conda deactivate" not in written([finding])
+
+
+def test_the_course_environment_is_seen_past_the_global_launcher(
+        here, course, monkeypatch, tmp_path):
+    nothing_active(monkeypatch)
+    own = installed_globally(monkeypatch, tmp_path)
+    course_bin = course.joinpath(*checks.ENV_PATH) / "bin"
+    monkeypatch.setenv("PATH", os.pathsep.join([str(own / "bin"), str(course_bin), "/usr/bin"]))
+    finding = checks.activation_check(ready(here, course))
+    assert finding.status == OK
+
+
+def test_a_conda_environment_that_has_im_in_it_is_still_named(
+        here, course, monkeypatch, tmp_path):
+    """Activated by the student, and `im` running from it: that one is real."""
+    nothing_active(monkeypatch)
+    monkeypatch.setenv("PIXI_HOME", str(tmp_path / "pixi-home"))
+    conda_env = tmp_path / "anaconda3" / "envs" / "course"
+    conda_env.mkdir(parents=True)
+    monkeypatch.setattr(checks.sys, "prefix", str(conda_env))
+    monkeypatch.setenv("CONDA_PREFIX", str(conda_env))
+    monkeypatch.setenv("CONDA_DEFAULT_ENV", "course")
+    finding = checks.activation_check(ready(here, course))
+    assert finding.status == WARN
+    assert "course is active" in finding.title
 
 
 def test_an_environment_that_is_not_built_is_not_told_to_be_activated(here, course, monkeypatch):
@@ -1860,3 +1909,54 @@ def test_a_missing_extension_the_pack_would_not_bring_is_named_itself(monkeypatc
     findings = with_extensions(monkeypatch, course, listed)
     warned = [f for f in findings if f.status == WARN]
     assert warned[0].fix == ["    code --install-extension quarto.quarto"]
+
+
+def folder_findings(monkeypatch, course: Path, opened: list) -> checks.Finding | None:
+    """The folder check, with VS Code remembering exactly `opened`."""
+    monkeypatch.setattr(checks.editor, "opened_folders",
+                        lambda: [checks.editor.Opened(folder, when) for folder, when in opened])
+    return checks.vscode_folder_check(
+        Context(system=platform.system(), cwd=course, folder=course))
+
+
+def test_a_subfolder_opened_in_vscode_is_named(monkeypatch, course):
+    (course / "week1").mkdir()
+    found = folder_findings(monkeypatch, course, [(course / "week1", 2000)])
+    assert found.status == WARN
+    assert any("week1" in line for line in found.detail)
+    assert str(course) in "\n".join(found.fix)
+
+
+def test_a_subfolder_used_since_the_course_folder_is_still_named(monkeypatch, course):
+    (course / "week1").mkdir()
+    found = folder_findings(monkeypatch, course, [(course, 1000), (course / "week1", 2000)])
+    assert found.status == WARN
+
+
+def test_a_mistake_already_put_right_is_not_brought_up(monkeypatch, course):
+    """week1 opened once, and the course folder opened since."""
+    (course / "week1").mkdir()
+    found = folder_findings(monkeypatch, course, [(course / "week1", 1000), (course, 2000)])
+    assert found.status == OK
+
+
+def test_a_folder_with_its_own_manifest_is_a_course_of_its_own(monkeypatch, course):
+    nested = course / "student-folder"
+    nested.mkdir()
+    (nested / "pixi.toml").write_text("[workspace]\n")
+    (nested / "week1").mkdir()
+    found = folder_findings(monkeypatch, course, [(nested, 2000), (nested / "week1", 3000)])
+    assert found is None
+
+
+def test_folders_outside_the_course_or_gone_are_not_its_business(monkeypatch, course, tmp_path):
+    elsewhere = tmp_path / "another-project"
+    elsewhere.mkdir()
+    found = folder_findings(monkeypatch, course, [(elsewhere, 2000),
+                                                  (course / "deleted-since", 3000)])
+    assert found is None
+
+
+def test_nothing_is_said_without_a_course_folder(monkeypatch, tmp_path):
+    monkeypatch.setattr(checks.editor, "opened_folders", lambda: [])
+    assert checks.vscode_folder_check(Context(system=platform.system(), cwd=tmp_path)) is None

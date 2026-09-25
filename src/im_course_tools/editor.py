@@ -19,14 +19,23 @@ What counts as a conflict is published with the course folder rather than
 written down here, for the same reason .check_env.py reads pixi.toml: the next
 one will be found in a class, and a list that travels with the download is one
 Kasper can add to without releasing this package to a hundred machines.
+
+A third thing came later: which folders VS Code has been opening. Everything the
+course folder arranges for the editor is read from the folder VS Code opens, and
+only from there. Open a folder inside it instead, `week1` say, and the settings
+are never read and the environment in .pixi is never found, because both are one
+level up from where VS Code is looking.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import platform
+import re
 import shutil
 import subprocess
+import urllib.parse
 from pathlib import Path
 from typing import NamedTuple
 
@@ -47,6 +56,74 @@ APPLICATIONS = (
     (os.path.expandvars(r"%LOCALAPPDATA%\Programs\Microsoft VS Code"), r"bin\code.cmd"),
     (os.path.expandvars(r"%PROGRAMFILES%\Microsoft VS Code"), r"bin\code.cmd"),
 )
+
+
+class Opened(NamedTuple):
+    """A folder VS Code has had open, and when it was last used."""
+
+    folder: Path
+    when: float
+
+
+def user_data_dir(system: str | None = None, home: Path | None = None,
+                  environ=None) -> Path:
+    """Where VS Code keeps what it remembers between sessions on this machine."""
+    system = system or platform.system()
+    home = home or Path.home()
+    environ = os.environ if environ is None else environ
+    if system == "Darwin":
+        return home / "Library" / "Application Support" / "Code"
+    if system == "Windows":
+        return Path(environ.get("APPDATA") or home / "AppData" / "Roaming") / "Code"
+    return Path(environ.get("XDG_CONFIG_HOME") or home / ".config") / "Code"
+
+
+def folder_from_uri(uri: str) -> Path | None:
+    """The folder a `file://` URI names, or None for anything else.
+
+    A folder opened over SSH, in WSL or in a container is written with a scheme
+    of its own, and is on some other machine as far as this one is concerned.
+    Windows writes its drive letter as `/c%3A/Users/...`, and the slash in
+    front of it has to go once the colon is back.
+    """
+    parsed = urllib.parse.urlparse(uri)
+    if parsed.scheme != "file" or parsed.netloc not in ("", "localhost"):
+        return None
+    path = urllib.parse.unquote(parsed.path)
+    if re.match(r"^/[A-Za-z]:", path):
+        path = path[1:]
+    return Path(path) if path else None
+
+
+def opened_folders(data: Path | None = None) -> list[Opened]:
+    """Every folder VS Code remembers opening, with when it was last used.
+
+    VS Code gives each folder it opens a directory of its own under
+    User/workspaceStorage, holding a workspace.json that names the folder and
+    the state it keeps for that folder. That state is written as the window is
+    used, so the newest file in the directory says when the folder was last
+    worked in. This only reads file names, one small JSON file and modification
+    times: it opens no database and changes nothing, and a directory it cannot
+    read is passed over rather than failed on.
+    """
+    storage = (data or user_data_dir()) / "User" / "workspaceStorage"
+    try:
+        entries = list(storage.iterdir())
+    except OSError:
+        return []
+
+    found: list[Opened] = []
+    for entry in entries:
+        try:
+            described = json.loads((entry / "workspace.json").read_text(encoding="utf-8"))
+            folder = folder_from_uri(str(described["folder"]))
+            when = max([entry.stat().st_mtime] +
+                       [inner.stat().st_mtime for inner in entry.iterdir()])
+        except (OSError, ValueError, TypeError, KeyError):
+            continue
+        if folder is not None:
+            found.append(Opened(folder, when))
+    return found
 
 
 class Conflict(NamedTuple):

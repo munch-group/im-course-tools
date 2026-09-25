@@ -179,7 +179,13 @@ cache that is thrown away again. It looks at, in this order:
   pixi getting through is what tells that apart from a machine where something
   really is in the way. Also proxy and certificate variables set in the
   terminal, and a clock wrong enough to make valid certificates look expired.
-- **VS Code** — installed, with the Python and Jupyter extensions.
+- **VS Code** — installed, with the Python and Jupyter extensions; and
+  whether it has been opening the course folder itself or a folder inside it,
+  read from what VS Code remembers about the folders it has opened. A folder
+  inside the course folder is the quiet version of being in the wrong folder:
+  the course settings are read only from the folder VS Code has open, and the
+  .pixi environment is looked for only below it, so the notebooks lose their
+  kernel while every command in the terminal still works.
 
 It answers one step of a staircase at a time. A student who is not in their
 course folder is told to `cd` there and run it again, and nothing else is
