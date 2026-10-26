@@ -485,9 +485,9 @@ def rerun(install: Install, echo, argv: list[str] | None = None) -> int:
     """
     argv = sys.argv[1:] if argv is None else argv
     command, folder = rerun_command(install, argv)
-    echo("")
-    echo(f"Running `im {' '.join(argv)}` again on the new one.".rstrip())
-    echo("")
+    # echo("")
+    # echo(f"Running `im {' '.join(argv)}` again on the new one.".rstrip())
+    # echo("")
     try:
         finished = subprocess.run(command, cwd=str(folder) if folder else None,
                                   env={**os.environ, "IM_NO_UPDATE_CHECK": "1"})
