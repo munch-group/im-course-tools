@@ -339,6 +339,78 @@ def test_update_does_not_touch_a_notebook_or_the_data(run, course, stopping_at_i
     run("update")
     assert (course / "week1" / "notebooks.ipynb").read_text() == "my own work"
     assert (course / "data" / "data_table.csv").read_text() == "mine\n"
+    assert not list((course / "data").rglob("*.backup"))
+
+
+def test_update_adds_a_data_file_the_student_does_not_have(run, course, site,
+                                                          stopping_at_install):
+    """A data file published after the folder was downloaded still arrives."""
+    published = dict(TEMPLATE)
+    published["data/new_this_week.fasta"] = ">seq\nATGTAG\n"
+    published["data/sub/nested.csv"] = "x\n1\n"
+    (site / f"{ROOT}.zip").write_bytes(zip_bytes(published))
+    (course / "data").mkdir()
+    (course / "data" / "data_table.csv").write_text("mine\n")
+
+    result = run("update")
+
+    assert (course / "data" / "new_this_week.fasta").read_text() == ">seq\nATGTAG\n"
+    assert (course / "data" / "sub" / "nested.csv").read_text() == "x\n1\n"
+    assert "Added data/new_this_week.fasta, a new data file" in result.output
+    # The one already there is the student's, and is neither replaced nor backed up.
+    assert (course / "data" / "data_table.csv").read_text() == "mine\n"
+    assert not list((course / "data").rglob("*.backup"))
+    assert "data_table.csv" not in result.output
+
+
+def test_update_creates_the_data_folder_when_it_is_missing(run, course,
+                                                          stopping_at_install):
+    run("update")
+    assert (course / "data" / "data_table.csv").read_text() == TEMPLATE["data/data_table.csv"]
+
+
+def test_update_never_adds_data_over_something_in_the_way(run, course, site,
+                                                         stopping_at_install):
+    """A folder, or a file where a folder should be, is the student's, not ours."""
+    published = dict(TEMPLATE)
+    published["data/blocked/inner.csv"] = "x\n"
+    (site / f"{ROOT}.zip").write_bytes(zip_bytes(published))
+    (course / "data").mkdir()
+    (course / "data" / "data_table.csv").mkdir()        # a folder of that name
+    (course / "data" / "blocked").write_text("a file\n")  # a file where a folder goes
+
+    result = run("update")
+
+    assert (course / "data" / "data_table.csv").is_dir()
+    assert (course / "data" / "blocked").read_text() == "a file\n"
+    assert "Added data/" not in result.output
+    assert "Installing" in result.output                 # and it carried on
+
+
+@pytest.mark.parametrize("name", ["data/../escaped.txt", "data/./x.csv",
+                                  "data//x.csv", "data/..\\escaped.txt",
+                                  "data/c:x.csv", "data", "elsewhere/x.csv"])
+def test_a_data_name_outside_the_data_folder_is_refused(name):
+    assert not environment.safe_data_name(name)
+
+
+def test_update_writes_nothing_outside_the_data_folder(run, course, site, tmp_path,
+                                                       stopping_at_install):
+    published = dict(TEMPLATE)
+    published["data/../../escaped.txt"] = "should not be here\n"
+    published["notes/elsewhere.txt"] = "nor here\n"
+    (site / f"{ROOT}.zip").write_bytes(zip_bytes(published))
+
+    run("update")
+
+    assert not (tmp_path / "escaped.txt").exists()
+    assert not (course / "escaped.txt").exists()
+    assert not (course / "notes").exists()
+
+
+def test_a_data_name_inside_the_data_folder_is_accepted():
+    assert environment.safe_data_name("data/x.csv")
+    assert environment.safe_data_name("data/sub/x.csv")
 
 
 def test_update_ignores_line_endings_a_windows_editor_rewrote(run, course,

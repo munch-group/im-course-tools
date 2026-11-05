@@ -45,6 +45,9 @@ Nothing ever overwrites a student's work.
   the course rather than to the student, and only the ones that actually differ
   from what the website is publishing, keeping a `.backup` of each one it does
   replace.
+- `im update` adds a file to `data/` only when nothing of that name is there,
+  and only under a plain path inside `data/`; a data file the student already
+  has is never compared, replaced or backed up.
 
 Files land in the course folder, found by walking up from wherever the student
 happens to be, so `im get` works two subfolders deep.
@@ -72,8 +75,13 @@ student starting today would download — and brings these up to date:
 | `.vscode/settings.json` | how VS Code finds the course Python |
 | `.vscode/extensions.json` | the extensions the course asks for |
 
-Nothing else in that download is touched: the week-one notebooks and the data
-folder arrive in it too, and both are places a student works.
+Nothing else in that download is replaced: the week-one notebooks and the data
+folder arrive in it too, and both are places a student works. The data folder
+gets one thing more. A file in the published `data/` that is missing from the
+student's is added, so a data file the course publishes in week five reaches
+the students who downloaded the folder in week one. A data file that is already
+there is left exactly as it is, edited or not. The flip side is that a data
+file a student deleted comes back on the next `im update`.
 
 Out of date means *different from what is published*, compared by content
 rather than by any timestamp — a clock, a fresh unzip and an editor that

@@ -131,6 +131,14 @@ FILES = (
     editor.CONFLICTS_FILE,
 )
 
+# The data folder gets one thing from `im update` and one thing only: a file
+# the website has and the student does not. A data file added to the course
+# after the folder was downloaded would otherwise reach nobody who already has
+# the folder. One that is already there is never compared, never replaced and
+# never backed up, whatever is in it, because a student may have edited it, and
+# the files here are ones they work with rather than course plumbing.
+DATA = "data"
+
 # The two without which there is no environment at all. A download missing one
 # of them is a broken build and worth stopping for. The others are taken
 # when they are there and passed over when they are not, so that dropping one
@@ -225,6 +233,63 @@ def published(data: bytes) -> dict[str, bytes] | None:
     return found
 
 
+def safe_data_name(name: str) -> bool:
+    """Whether a name read out of the archive may be written under data/.
+
+    The names in FILES are this module's own; these come from the archive, so
+    each is checked before it is allowed anywhere near the disk. Only plain
+    relative paths below data/ pass: no `..`, no empty or `.` parts, no
+    backslashes that Windows would read as separators, no drive letters.
+    """
+    if "\\" in name or ":" in name:
+        return False
+    parts = name.split("/")
+    return (len(parts) >= 2 and parts[0] == DATA
+            and all(part not in ("", ".", "..") for part in parts))
+
+
+def published_data(data: bytes) -> dict[str, bytes]:
+    """The files in the published data folder, by their name in the course folder.
+
+    Read from the same download as `published`, which has already vouched for
+    it, so an archive that cannot be read here simply offers no data.
+    """
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(data))
+        root = single_root(archive)
+        if root is None:
+            return {}
+        found = {}
+        for member in archive.namelist():
+            if member.endswith("/") or not member.startswith(f"{root}/"):
+                continue
+            name = member[len(root) + 1:]
+            if safe_data_name(name):
+                found[name] = archive.read(member)
+    except (zipfile.BadZipFile, OSError, ValueError):
+        return {}
+    return found
+
+
+def missing_data(folder: Path, offered: dict[str, bytes]) -> list[str]:
+    """The published data files with nothing at all in their place on disk.
+
+    Anything there counts as there, a folder or a link included, so a student's
+    own file of the same name is never written over. A name that would have to
+    pass through something that is not a folder cannot be added and is left out.
+    """
+    missing = []
+    for name in sorted(offered):
+        target = folder.joinpath(*name.split("/"))
+        if target.exists() or target.is_symlink():
+            continue
+        between = [p for p in target.parents if folder in p.parents]
+        if any((p.exists() or p.is_symlink()) and not p.is_dir() for p in between):
+            continue
+        missing.append(name)
+    return missing
+
+
 def normalise(name: str, content: bytes) -> bytes:
     """What is actually compared: the file, less what is not the website's business.
 
@@ -274,7 +339,8 @@ def put(folder: Path, name: str, content: bytes) -> bool:
 def update(folder: Path, echo) -> int:
     """Bring the course folder's own files up to date, then install."""
     echo(f"Fetching {url_for(ARCHIVE)}")
-    theirs = published(fetch_bytes(ARCHIVE, timeout=180))
+    download = fetch_bytes(ARCHIVE, timeout=180)
+    theirs = published(download)
     if theirs is None:
         echo("\nWhat came back does not look like the course folder.")
         echo("Nothing has been changed. Please tell your instructor.")
@@ -312,6 +378,14 @@ def update(folder: Path, echo) -> int:
              f"already up to date.")
     elif current:
         echo(f"All {current} of your course folder's files were already up to date.")
+
+    # After the count, which is about the files above and only those: a data
+    # file is added when it is missing and otherwise never looked at, so it is
+    # neither up to date nor out of it.
+    offered = published_data(download)
+    for name in missing_data(folder, offered):
+        put(folder, name, offered[name])
+        echo(f"Added {name}, a new data file")
 
     # Extensions, before the install rather than after it, because this is the
     # part a student is most likely to walk away from: `pixi install` can take
