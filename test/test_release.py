@@ -196,6 +196,50 @@ def test_a_course_environment_is_upgraded_in_the_course_folder(tools, tmp_path):
     assert folder == tmp_path
 
 
+def test_a_course_upgrade_installs_after_updating_the_lock(tools, tmp_path):
+    """`pixi update` only rewrites pixi.lock; the environment changes on install."""
+    prepared = release.upgrade_command(
+        Install(CONDA_PROJECT, "0.1.3", Path("/x"), project=tmp_path))
+    assert release.as_typed(prepared) == [
+        f'cd "{tmp_path}"', f"/bin/pixi update {PACKAGE}", "/bin/pixi install"]
+
+
+def test_a_course_upgrade_runs_the_install_and_reads_the_new_version(tools, tmp_path,
+                                                                    monkeypatch):
+    prefix = conda_prefix(tmp_path / "env", version="0.1.3")
+    install = Install(CONDA_PROJECT, "0.1.3", prefix, project=tmp_path)
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if command[1:] == ["install"]:               # what actually changes the env
+            meta = prefix / "conda-meta"
+            for old in meta.glob(f"{PACKAGE}-*.json"):
+                old.unlink()
+            (meta / f"{PACKAGE}-0.2.0-py_0.json").write_text(json.dumps(
+                {"name": PACKAGE, "version": "0.2.0"}))
+        return type("Finished", (), {"returncode": 0, "stdout": ""})()
+
+    monkeypatch.setattr(release.subprocess, "run", fake_run)
+    lines = []
+    assert release.upgrade(install, lines.append) == 0
+    assert calls == [["/bin/pixi", "update", PACKAGE], ["/bin/pixi", "install"]]
+    assert "still" not in "\n".join(lines)
+
+
+def test_a_failed_lock_update_is_not_followed_by_an_install(tools, tmp_path, monkeypatch):
+    install = Install(CONDA_PROJECT, "0.1.3", Path("/x"), project=tmp_path)
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return type("Finished", (), {"returncode": 2, "stdout": ""})()
+
+    monkeypatch.setattr(release.subprocess, "run", fake_run)
+    assert release.upgrade(install, lambda line: None) == 2
+    assert calls == [["/bin/pixi", "update", PACKAGE]]
+
+
 def test_another_conda_environment_is_upgraded_from_its_own_channel(tools):
     command, _ = release.upgrade_command(
         Install(CONDA, "0.1.3", Path("/x"), owner="munch-group"))

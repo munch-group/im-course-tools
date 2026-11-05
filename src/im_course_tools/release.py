@@ -365,11 +365,26 @@ def upgrade_command(install: Install) -> tuple[list[str], Path | None] | None:
     return None
 
 
+def follow_up(command: list[str]) -> list[str] | None:
+    """What has to run after the upgrade command for it to have any effect.
+
+    `pixi update` in a course folder rewrites pixi.lock and stops there: the
+    environment is left exactly as it was until something installs from the
+    new lock. Without this, the version read back afterwards is the old one,
+    and the student is told the newer im has not reached the channel when it
+    is sitting in their own lock file.
+    """
+    if command[1:] == ["update", PACKAGE]:
+        return [command[0], "install"]
+    return None
+
+
 def as_typed(prepared: tuple[list[str], Path | None]) -> list[str]:
     """The upgrade command as a student would type it, cd included when needed."""
     command, folder = prepared
     lines = [f'cd "{folder}"'] if folder else []
-    return lines + [" ".join(command)]
+    then = follow_up(command)
+    return lines + [" ".join(command)] + ([" ".join(then)] if then else [])
 
 
 def say_if_newer(echo, available: str | None, install: Install) -> bool:
@@ -595,6 +610,9 @@ def upgrade(install: Install, echo) -> int:
     echo("")
     try:
         finished = subprocess.run(command, cwd=str(folder) if folder else None)
+        then = follow_up(command)
+        if then and finished.returncode == 0:
+            finished = subprocess.run(then, cwd=str(folder) if folder else None)
     except OSError as error:
         echo(f"That could not be started: {error}")
         return 1
